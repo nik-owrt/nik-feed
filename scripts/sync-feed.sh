@@ -22,17 +22,25 @@ public_key_file="$repo_root/keys/nik-feed.pub"
 leaf="$output_root/$channel/$openwrt_version/$package_arch"
 work="$(mktemp -d)"
 pool="$work/pool"
+skipped="$work/skipped.tsv"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$pool" "$leaf"
+: > "$skipped"
 rm -rf "$leaf"/*
 
 previous_url="$feed_base_url/$channel/$openwrt_version/$package_arch"
-if curl -fsSL "$previous_url/files.txt" -o "$work/previous-files.txt"; then
-  while IFS= read -r file; do
-    [[ -n "$file" ]] || continue
-    [[ "$file" == "$(basename "$file")" && "$file" == *.ipk ]] || { echo "invalid previous feed filename: $file" >&2; exit 1; }
-    curl -fsSL "$previous_url/$file" -o "$pool/$file"
-  done < "$work/previous-files.txt"
+if curl -fsSL "$previous_url/feed.json" -o "$work/previous-feed.json"; then
+  previous_pbid="$(jq -r '.platform_build_id // empty' "$work/previous-feed.json")"
+  if [[ "$previous_pbid" == "$platform_build_id" ]] && curl -fsSL "$previous_url/files.txt" -o "$work/previous-files.txt"; then
+    echo "Reusing previous compatible feed snapshot for PBID $platform_build_id"
+    while IFS= read -r file; do
+      [[ -n "$file" ]] || continue
+      [[ "$file" == "$(basename "$file")" && "$file" == *.ipk ]] || { echo "invalid previous feed filename: $file" >&2; exit 1; }
+      curl -fsSL "$previous_url/$file" -o "$pool/$file"
+    done < "$work/previous-files.txt"
+  else
+    echo "Previous feed PBID ${previous_pbid:-unknown} is not compatible with $platform_build_id; starting fresh"
+  fi
 else
   echo "No previous feed snapshot found; starting fresh"
 fi
@@ -45,19 +53,25 @@ while IFS= read -r package; do
 
   image="ghcr.io/nik-owrt/openwrt-package-${package}:latest"
   echo "Pulling $image"
-  docker pull "$image" >/dev/null
+  if ! pull_output="$(docker pull "$image" 2>&1)"; then
+    echo "::warning::$package has no readable :latest OCI image; keeping previous compatible version if available"
+    printf '%s\t%s\n' "$package" "missing-latest" >> "$skipped"
+    continue
+  fi
 
   kind="$(docker image inspect --format '{{ index .Config.Labels "org.nik-link.artifact-kind" }}' "$image")"
   image_package="$(docker image inspect --format '{{ index .Config.Labels "org.nik-link.package" }}' "$image")"
   image_pbid="$(docker image inspect --format '{{ index .Config.Labels "org.nik-link.platform-build-id" }}' "$image")"
   [[ "$kind" == "openwrt-package" && "$image_package" == "$package" ]] || { echo "invalid OCI package metadata for $package" >&2; exit 1; }
-  [[ "$image_pbid" == "$platform_build_id" ]] || { echo "$package was built for PBID $image_pbid, expected $platform_build_id" >&2; exit 1; }
+
+  if [[ "$image_pbid" != "$platform_build_id" ]]; then
+    echo "::warning::$package latest PBID $image_pbid is incompatible with current $platform_build_id; keeping previous compatible version if available"
+    printf '%s\t%s\n' "$package" "incompatible-pbid:$image_pbid" >> "$skipped"
+    continue
+  fi
 
   package_dir="$work/$package"
   mkdir -p "$package_dir"
-  # Package OCI images are FROM scratch and intentionally have no CMD.
-  # docker create still needs a command in the container config even though
-  # the container is never started; the dummy command only enables docker cp.
   cid="$(docker create "$image" /bin/true)"
   trap 'docker rm -f "$cid" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
   docker cp "$cid:/package/." "$package_dir/"
@@ -78,7 +92,7 @@ while IFS= read -r package; do
 done < "$packages_file"
 
 mapfile -t package_names < <(find "$pool" -maxdepth 1 -type f -name '*.ipk' -printf '%f\n' | sed 's/_.*$//' | sort -u)
-[[ "${#package_names[@]}" -gt 0 ]] || { echo "no IPKs available for feed" >&2; exit 1; }
+[[ "${#package_names[@]}" -gt 0 ]] || { echo "no compatible IPKs available for feed" >&2; exit 1; }
 
 for package in "${package_names[@]}"; do
   mapfile -t versions < <(find "$pool" -maxdepth 1 -type f -name "${package}_*.ipk" -printf '%f\n' | sort -V)
@@ -113,8 +127,12 @@ docker run --rm \
   '
 
 find "$leaf" -maxdepth 1 -type f -name '*.ipk' -printf '%f\n' | sort -V > "$leaf/files.txt"
-package_count="$(wc -l < "$leaf/files.txt" | tr -d ' ')"
+ipk_count="$(wc -l < "$leaf/files.txt" | tr -d ' ')"
+available_count="$(sed 's/_.*$//' "$leaf/files.txt" | sort -u | grep -c . || true)"
+expected_count="$(awk '{ sub(/#.*/, ""); gsub(/[[:space:]]/, ""); if (length) n++ } END { print n+0 }' "$packages_file")"
+skipped_json="$(jq -Rn '[inputs | select(length > 0) | split("\t") | {package:.[0], reason:.[1]}]' < "$skipped")"
 generated="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 jq -n \
   --arg channel "$channel" \
   --arg openwrt "$openwrt_version" \
@@ -122,8 +140,15 @@ jq -n \
   --arg pbid "$platform_build_id" \
   --arg generated "$generated" \
   --argjson keep "$keep_versions" \
-  --argjson packages "$package_count" \
-  '{schema_version:1,channel:$channel,openwrt_version:$openwrt,architecture:$arch,platform_build_id:$pbid,generated_at:$generated,keep_versions:$keep,ipk_count:$packages}' \
+  --argjson ipks "$ipk_count" \
+  --argjson expected "$expected_count" \
+  --argjson available "$available_count" \
+  --argjson skipped "$skipped_json" \
+  '{schema_version:1,channel:$channel,openwrt_version:$openwrt,architecture:$arch,platform_build_id:$pbid,generated_at:$generated,keep_versions:$keep,ipk_count:$ipks,expected_packages:$expected,available_packages:$available,skipped_packages:$skipped}' \
   > "$leaf/feed.json"
 
-printf 'Published %s IPKs to %s\n' "$package_count" "$leaf"
+printf 'Published %s IPKs for %s/%s packages to %s\n' "$ipk_count" "$available_count" "$expected_count" "$leaf"
+if [[ -s "$skipped" ]]; then
+  echo "Skipped package candidates:"
+  cat "$skipped"
+fi

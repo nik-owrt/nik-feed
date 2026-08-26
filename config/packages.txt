@@ -1,0 +1,13 @@
+# Active NIK OpenWrt package repositories.
+# One repository/package name per line. Empty lines and # comments are ignored.
+br-core
+br-cellular
+br-clients
+br-cloud
+br-mesh
+br-network
+br-quicksetup
+br-security
+br-system
+br-wifi
+br-zerotier

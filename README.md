@@ -14,6 +14,14 @@ Router configuration:
 src/gz nik_dev https://nik-owrt.github.io/nik-feed/dev/24.10.4/aarch64_cortex-a53
 ```
 
+## Trust model
+
+The NIK feed public key is a firmware trust anchor. Routers must receive it from the firmware image (for example `/etc/opkg/keys/<fingerprint>`), not bootstrap trust by downloading a key from this feed.
+
+The repository keeps `keys/nik-feed.pub` only so CI can verify the signature it just created. The Pages artifact intentionally does not publish that key.
+
+The private signing key exists only as the `NIK_FEED_SIGNING_KEY` GitHub Actions secret and must never be committed or included in firmware.
+
 ## Publishing model
 
 Package repositories already publish OCI images such as:
@@ -30,7 +38,7 @@ The feed workflow:
 4. Rejects packages built for a different platform build ID.
 5. Merges new IPKs with the previous snapshot and keeps the latest 3 versions per package.
 6. Generates `Packages`, `Packages.gz`, `Packages.manifest` and `Packages.sig` using tools from the exact NIK OpenWrt SDK.
-7. Verifies the signature with `keys/nik-feed.pub`.
+7. Verifies the signature with repository `keys/nik-feed.pub` without publishing that key to Pages.
 8. Atomically deploys the new snapshot to GitHub Pages.
 
 The workflow also runs every 15 minutes as a fallback and accepts `repository_dispatch` event `package-published` for immediate publishing.

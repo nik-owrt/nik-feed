@@ -36,21 +36,25 @@ The private signing key exists only as the `NIK_FEED_SIGNING_KEY` GitHub Actions
 Package repositories publish OCI images such as:
 
 ```text
-ghcr.io/nik-owrt/openwrt-package-br-wifi:latest
+ghcr.io/nik-owrt/openwrt-package-fr-wifi:latest
 ```
 
 The feed is a rolling snapshot, not a package archive:
 
-1. Resolve the current immutable NIK OpenWrt SDK and platform build ID.
-2. Pull `:latest` for every active package in `config/packages.txt`.
-3. Require exact PBID, SDK reference and package-architecture compatibility.
-4. Replace the previous version of that package in the candidate snapshot.
-5. Enforce exactly one IPK per package.
-6. Generate and sign `Packages`, `Packages.gz`, `Packages.manifest` and `Packages.sig` using the exact immutable NIK SDK.
-7. Generate `feed.json` with OpenWrt version, architecture, PBID, immutable SDK reference, package versions, dependencies, file names, sizes and SHA-256 hashes.
-8. Atomically deploy the clean snapshot to GitHub Pages.
+1. Resolve the current NIK SDK/platform generation used to sign and index the feed.
+2. Read package compatibility policy from `config/compatibility.json`.
+3. Resolve `architecture-all` modules from their independent `:latest` aliases.
+4. Resolve ABI-sensitive packages such as `br-core` from `compat-<userspace-abi-id>`.
+5. Replace only the package that has a newer compatible artifact; unrelated packages remain untouched.
+6. Enforce exactly one IPK per package.
+7. Validate real IPK architecture (`all` for independent modules; platform arch for ABI-sensitive modules).
+8. Generate and sign `Packages`, `Packages.gz`, `Packages.manifest` and `Packages.sig` with the current immutable NIK SDK.
+9. Generate `feed.json` containing feed-generation PBID/SDK plus per-package version, dependencies, SHA-256, source PBID, source SDK, compatibility mode and immutable OCI digest.
+10. Atomically deploy the clean snapshot to GitHub Pages.
 
-A temporarily missing `:latest` package may reuse its last known-good package only when the previous feed belongs to the exact same PBID/SDK. The feed still contains at most one version of that package.
+This means a new `fr-wifi` can be built and published later and become immediately available through `opkg upgrade fr-wifi` without rebuilding firmware. PBID and SDK remain provenance; only packages whose compatibility mode requires platform ABI matching are locked to a compatibility generation.
+
+If a compatible package publication is temporarily unavailable, the feed may retain its previous compatible package. It still retains at most one version of that package.
 
 The workflow runs every 15 minutes as a fallback and accepts `repository_dispatch` event `package-published` for immediate publishing.
 

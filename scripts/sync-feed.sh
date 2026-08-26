@@ -40,7 +40,7 @@ while IFS= read -r package; do
   package="${package%%#*}"
   package="${package//[[:space:]]/}"
   [[ -n "$package" ]] || continue
-  [[ "$package" =~ ^br-[a-z0-9-]+$ ]] || { echo "invalid package name: $package" >&2; exit 1; }
+  [[ "$package" =~ ^(br|fr)-[a-z0-9-]+$ ]] || { echo "invalid package name: $package" >&2; exit 1; }
 
   image="ghcr.io/nik-owrt/openwrt-package-${package}:latest"
   echo "Pulling $image"

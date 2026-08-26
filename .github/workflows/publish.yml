@@ -25,7 +25,7 @@ env:
 
 jobs:
   preflight:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nik-heavy]
     timeout-minutes: 5
     outputs:
       ready: ${{ steps.check.outputs.ready }}
@@ -57,7 +57,7 @@ jobs:
   build:
     needs: preflight
     if: needs.preflight.outputs.ready == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nik-heavy]
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -134,7 +134,7 @@ jobs:
   deploy:
     needs: build
     if: needs.build.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nik-heavy]
     timeout-minutes: 10
     environment:
       name: github-pages

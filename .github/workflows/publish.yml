@@ -1,6 +1,8 @@
 name: Publish OPKG dev feed
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
   repository_dispatch:
     types: [package-published]

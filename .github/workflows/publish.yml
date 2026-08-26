@@ -23,7 +23,7 @@ env:
   CHANNEL: dev
   OPENWRT_VERSION: '24.10.4'
   PACKAGE_ARCH: aarch64_cortex-a53
-  KEEP_VERSIONS: '3'
+  KEEP_VERSIONS: '1'
   FEED_BASE_URL: https://nik-owrt.github.io/nik-feed
 
 jobs:
@@ -136,7 +136,7 @@ jobs:
           cat > public/index.html <<EOF
           <!doctype html>
           <html lang="en"><head><meta charset="utf-8"><title>NIK OpenWrt feed</title></head>
-          <body><h1>NIK OpenWrt OPKG feed</h1><p>Channel: dev</p><p><a href="${leaf}/Packages.gz">Packages.gz</a></p><p><a href="${leaf}/feed.json">feed.json</a></p></body></html>
+          <body><h1>NIK OpenWrt OPKG feed</h1><p>Channel: dev</p><p>Retention: exactly one current version per package.</p><p><a href="${leaf}/Packages.gz">Packages.gz</a></p><p><a href="${leaf}/feed.json">feed.json</a></p></body></html>
           EOF
 
       - name: Configure Pages

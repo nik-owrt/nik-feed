@@ -55,7 +55,10 @@ while IFS= read -r package; do
 
   package_dir="$work/$package"
   mkdir -p "$package_dir"
-  cid="$(docker create "$image")"
+  # Package OCI images are FROM scratch and intentionally have no CMD.
+  # docker create still needs a command in the container config even though
+  # the container is never started; the dummy command only enables docker cp.
+  cid="$(docker create "$image" /bin/true)"
   trap 'docker rm -f "$cid" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
   docker cp "$cid:/package/." "$package_dir/"
   docker rm "$cid" >/dev/null

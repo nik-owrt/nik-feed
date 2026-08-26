@@ -1,0 +1,6 @@
+{
+  "default": "architecture-all",
+  "packages": {
+    "br-core": "userspace-abi-v1"
+  }
+}

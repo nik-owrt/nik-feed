@@ -14,9 +14,18 @@ Router configuration:
 src/gz nik_dev https://nik-owrt.github.io/nik-feed/dev/24.10.4/aarch64_cortex-a53
 ```
 
+The production firmware ships this URL in `/etc/opkg/customfeeds.conf` together with the NIK usign public key, so a router can update a single module independently:
+
+```sh
+opkg update
+opkg upgrade fr-wifi
+```
+
+No firmware rebuild is required when only a compatible NIK package changes.
+
 ## Trust model
 
-The NIK feed public key is a firmware trust anchor. Routers must receive it from the firmware image (for example `/etc/opkg/keys/<fingerprint>`), not bootstrap trust by downloading a key from this feed.
+The NIK feed public key is a firmware trust anchor. Routers receive it from the firmware image as `/etc/opkg/keys/de2c9e01106fbc10`; the feed never bootstraps its own trust.
 
 The repository keeps `keys/nik-feed.pub` only so CI can verify the signature it just created. The Pages artifact intentionally does not publish that key.
 
@@ -24,24 +33,26 @@ The private signing key exists only as the `NIK_FEED_SIGNING_KEY` GitHub Actions
 
 ## Publishing model
 
-Package repositories already publish OCI images such as:
+Package repositories publish OCI images such as:
 
 ```text
 ghcr.io/nik-owrt/openwrt-package-br-wifi:latest
 ```
 
-The feed workflow:
+The feed is a rolling snapshot, not a package archive:
 
-1. Resolves the current immutable NIK OpenWrt SDK and platform build ID.
-2. Downloads the previous public feed snapshot when one exists.
-3. Pulls the latest OCI image for every active package in `config/packages.txt`.
-4. Rejects packages built for a different platform build ID.
-5. Merges new IPKs with the previous snapshot and keeps the latest 3 versions per package.
-6. Generates `Packages`, `Packages.gz`, `Packages.manifest` and `Packages.sig` using tools from the exact NIK OpenWrt SDK.
-7. Verifies the signature with repository `keys/nik-feed.pub` without publishing that key to Pages.
-8. Atomically deploys the new snapshot to GitHub Pages.
+1. Resolve the current immutable NIK OpenWrt SDK and platform build ID.
+2. Pull `:latest` for every active package in `config/packages.txt`.
+3. Require exact PBID, SDK reference and package-architecture compatibility.
+4. Replace the previous version of that package in the candidate snapshot.
+5. Enforce exactly one IPK per package.
+6. Generate and sign `Packages`, `Packages.gz`, `Packages.manifest` and `Packages.sig` using the exact immutable NIK SDK.
+7. Generate `feed.json` with OpenWrt version, architecture, PBID, immutable SDK reference, package versions, dependencies, file names, sizes and SHA-256 hashes.
+8. Atomically deploy the clean snapshot to GitHub Pages.
 
-The workflow also runs every 15 minutes as a fallback and accepts `repository_dispatch` event `package-published` for immediate publishing.
+A temporarily missing `:latest` package may reuse its last known-good package only when the previous feed belongs to the exact same PBID/SDK. The feed still contains at most one version of that package.
+
+The workflow runs every 15 minutes as a fallback and accepts `repository_dispatch` event `package-published` for immediate publishing.
 
 ## Required secrets
 

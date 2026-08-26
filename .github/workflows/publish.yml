@@ -24,16 +24,19 @@ env:
   FEED_BASE_URL: https://nik-owrt.github.io/nik-feed
 
 jobs:
-  build:
+  preflight:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Validate required secrets and key
+      - name: Check bootstrap state
+        id: check
         shell: bash
         env:
           GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
@@ -41,10 +44,26 @@ jobs:
           NIK_FEED_SIGNING_KEY: ${{ secrets.NIK_FEED_SIGNING_KEY }}
         run: |
           set -euo pipefail
-          [[ -n "$GHCR_USERNAME" ]] || { echo 'missing GHCR_USERNAME secret' >&2; exit 1; }
-          [[ -n "$GHCR_READ_TOKEN" ]] || { echo 'missing GHCR_READ_TOKEN secret' >&2; exit 1; }
-          [[ -n "$NIK_FEED_SIGNING_KEY" ]] || { echo 'missing NIK_FEED_SIGNING_KEY secret' >&2; exit 1; }
-          [[ -s keys/nik-feed.pub ]] || { echo 'missing keys/nik-feed.pub' >&2; exit 1; }
+          ready=true
+          [[ -n "$GHCR_USERNAME" ]] || ready=false
+          [[ -n "$GHCR_READ_TOKEN" ]] || ready=false
+          [[ -n "$NIK_FEED_SIGNING_KEY" ]] || ready=false
+          [[ -s keys/nik-feed.pub ]] || ready=false
+          echo "ready=$ready" >> "$GITHUB_OUTPUT"
+          if [[ "$ready" != true ]]; then
+            echo 'Feed bootstrap is incomplete; publish is skipped cleanly.'
+          fi
+
+  build:
+    needs: preflight
+    if: needs.preflight.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Authenticate to GHCR
         shell: bash
@@ -114,6 +133,7 @@ jobs:
 
   deploy:
     needs: build
+    if: needs.build.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:

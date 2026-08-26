@@ -12,11 +12,12 @@ feed_base_url="${FEED_BASE_URL:-https://nik-owrt.github.io/nik-feed}"
 platform_build_id="${PLATFORM_BUILD_ID:?PLATFORM_BUILD_ID is required}"
 sdk_reference="${SDK_REFERENCE:?SDK_REFERENCE is required}"
 signing_key_file="${SIGNING_KEY_FILE:?SIGNING_KEY_FILE is required}"
+public_key_file="$repo_root/keys/nik-feed.pub"
 
 [[ "$keep_versions" =~ ^[1-9][0-9]*$ ]] || { echo "KEEP_VERSIONS must be a positive integer" >&2; exit 1; }
 [[ "$platform_build_id" =~ ^[0-9a-f]{12}$ ]] || { echo "invalid PLATFORM_BUILD_ID" >&2; exit 1; }
 [[ "$sdk_reference" =~ ^ghcr\.io/nik-owrt/openwrt-sdk@sha256:[0-9a-f]{64}$ ]] || { echo "SDK_REFERENCE must be immutable" >&2; exit 1; }
-[[ -s "$packages_file" && -s "$signing_key_file" && -s "$repo_root/keys/nik-feed.pub" ]] || { echo "package manifest/signing keys are missing" >&2; exit 1; }
+[[ -s "$packages_file" && -s "$signing_key_file" && -s "$public_key_file" ]] || { echo "package manifest/signing keys are missing" >&2; exit 1; }
 
 leaf="$output_root/$channel/$openwrt_version/$package_arch"
 work="$(mktemp -d)"
@@ -87,11 +88,10 @@ for package in "${package_names[@]}"; do
   done
 done
 
-install -m 0644 "$repo_root/keys/nik-feed.pub" "$leaf/nik-feed.pub"
-
 docker run --rm \
   --mount "type=bind,src=$leaf,dst=/feed" \
   --mount "type=bind,src=$signing_key_file,dst=/run/nik-feed.sec,readonly" \
+  --mount "type=bind,src=$public_key_file,dst=/run/nik-feed.pub,readonly" \
   "$sdk_reference" bash -lc '
     set -euo pipefail
     cd /feed
@@ -105,7 +105,7 @@ docker run --rm \
     esac
     gzip -9nc Packages > Packages.gz
     "$usign" -S -m Packages -s /run/nik-feed.sec -x Packages.sig
-    "$usign" -V -m Packages -p nik-feed.pub -x Packages.sig
+    "$usign" -V -m Packages -p /run/nik-feed.pub -x Packages.sig
     rm -f Packages.index.log
   '
 

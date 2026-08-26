@@ -39,11 +39,6 @@ runs:
         deleted=0
         while :; do
           versions="$(curl --fail-with-body --silent --show-error -L "${headers[@]}" "$endpoint")"
-          mapfile -t old_ids < <(python3 - "$keep_id" <<'PY' <<<"$versions"
-        PY
-          )
-          # The here-doc above cannot share stdin with the JSON body; use an
-          # environment-free parser invocation instead.
           mapfile -t old_ids < <(printf '%s' "$versions" | python3 -c 'import json,sys; keep=int(sys.argv[1]); print("\n".join(str(v["id"]) for v in json.load(sys.stdin) if int(v["id"]) != keep))' "$keep_id")
           ((${#old_ids[@]} > 0)) || break
           for version_id in "${old_ids[@]}"; do

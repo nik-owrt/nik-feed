@@ -30,7 +30,7 @@ runs:
         keep_id=""
         for attempt in 1 2 3 4 5; do
           versions="$(curl --fail-with-body --silent --show-error -L "${headers[@]}" "$endpoint")"
-          keep_id="$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((str(v["id"]) for v in data if "latest" in ((v.get("metadata",{}).get("container",{}).get("tags")) or [])), ""))' <<<"$versions")"
+          keep_id="$(python3 -c 'import json,sys; data=json.load(sys.stdin); sys.stdout.write(next((str(v["id"]) for v in data if "latest" in ((v.get("metadata",{}).get("container",{}).get("tags")) or [])), ""))' <<<"$versions")"
           [[ "$keep_id" =~ ^[0-9]+$ ]] && break
           sleep 2
         done
@@ -39,7 +39,7 @@ runs:
         deleted=0
         while :; do
           versions="$(curl --fail-with-body --silent --show-error -L "${headers[@]}" "$endpoint")"
-          mapfile -t old_ids < <(printf '%s' "$versions" | python3 -c 'import json,sys; keep=int(sys.argv[1]); print("\n".join(str(v["id"]) for v in json.load(sys.stdin) if int(v["id"]) != keep))' "$keep_id")
+          mapfile -t old_ids < <(printf '%s' "$versions" | python3 -c 'import json,sys; keep=int(sys.argv[1]); sys.stdout.write("\n".join(str(v["id"]) for v in json.load(sys.stdin) if int(v["id"]) != keep))' "$keep_id")
           ((${#old_ids[@]} > 0)) || break
           for version_id in "${old_ids[@]}"; do
             [[ "$version_id" =~ ^[0-9]+$ ]] || { echo "invalid package version id: $version_id" >&2; exit 1; }

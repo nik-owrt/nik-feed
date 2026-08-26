@@ -1,0 +1,125 @@
+name: Publish OPKG dev feed
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [package-published]
+  schedule:
+    - cron: '*/15 * * * *'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: nik-feed-dev
+  cancel-in-progress: false
+
+env:
+  CHANNEL: dev
+  OPENWRT_VERSION: '24.10.4'
+  PACKAGE_ARCH: aarch64_cortex-a53
+  KEEP_VERSIONS: '3'
+  FEED_BASE_URL: https://nik-owrt.github.io/nik-feed
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate required secrets and key
+        shell: bash
+        env:
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          NIK_FEED_SIGNING_KEY: ${{ secrets.NIK_FEED_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$GHCR_USERNAME" ]] || { echo 'missing GHCR_USERNAME secret' >&2; exit 1; }
+          [[ -n "$GHCR_READ_TOKEN" ]] || { echo 'missing GHCR_READ_TOKEN secret' >&2; exit 1; }
+          [[ -n "$NIK_FEED_SIGNING_KEY" ]] || { echo 'missing NIK_FEED_SIGNING_KEY secret' >&2; exit 1; }
+          [[ -s keys/nik-feed.pub ]] || { echo 'missing keys/nik-feed.pub' >&2; exit 1; }
+
+      - name: Authenticate to GHCR
+        shell: bash
+        env:
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_READ_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+
+      - name: Resolve current immutable SDK
+        id: platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          pair='ghcr.io/nik-owrt/openwrt-platform-pair:sy-fb-r3000-latest'
+          docker pull "$pair" >/dev/null
+          sdk="$(docker image inspect --format '{{ index .Config.Labels "org.nik-link.sdk-reference" }}' "$pair")"
+          pbid="$(docker image inspect --format '{{ index .Config.Labels "org.nik-link.platform-build-id" }}' "$pair")"
+          [[ "$sdk" =~ ^ghcr\.io/nik-owrt/openwrt-sdk@sha256:[0-9a-f]{64}$ ]] || { echo 'invalid SDK reference' >&2; exit 1; }
+          [[ "$pbid" =~ ^[0-9a-f]{12}$ ]] || { echo 'invalid platform build ID' >&2; exit 1; }
+          echo "SDK_REFERENCE=$sdk" >> "$GITHUB_ENV"
+          echo "PLATFORM_BUILD_ID=$pbid" >> "$GITHUB_ENV"
+          echo "pbid=$pbid" >> "$GITHUB_OUTPUT"
+          docker pull "$sdk" >/dev/null
+
+      - name: Materialize signing key
+        shell: bash
+        env:
+          NIK_FEED_SIGNING_KEY: ${{ secrets.NIK_FEED_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/nik-feed.sec"
+          printf '%s\n' "$NIK_FEED_SIGNING_KEY" > "$key"
+          chmod 600 "$key"
+          echo "SIGNING_KEY_FILE=$key" >> "$GITHUB_ENV"
+
+      - name: Build rolling feed snapshot
+        shell: bash
+        run: bash scripts/sync-feed.sh "$GITHUB_WORKSPACE/public"
+
+      - name: Build landing page
+        shell: bash
+        run: |
+          set -euo pipefail
+          leaf="dev/${OPENWRT_VERSION}/${PACKAGE_ARCH}"
+          cat > public/index.html <<EOF
+          <!doctype html>
+          <html lang="en"><head><meta charset="utf-8"><title>NIK OpenWrt feed</title></head>
+          <body><h1>NIK OpenWrt OPKG feed</h1><p>Channel: dev</p><p><a href="${leaf}/Packages.gz">Packages.gz</a></p><p><a href="${leaf}/feed.json">feed.json</a></p></body></html>
+          EOF
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: public
+
+      - name: Logout and remove signing key
+        if: always()
+        shell: bash
+        run: |
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          rm -f "$RUNNER_TEMP/nik-feed.sec"
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

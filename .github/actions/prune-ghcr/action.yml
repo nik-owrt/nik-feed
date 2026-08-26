@@ -1,0 +1,57 @@
+name: Prune GHCR package versions
+description: Keep only the GHCR container version that currently owns the latest tag.
+inputs:
+  github-token:
+    description: GITHUB_TOKEN with admin access to the package
+    required: true
+  organization:
+    description: GitHub organization owning the package
+    required: true
+  package:
+    description: GHCR container package name
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        PACKAGE_ORG: ${{ inputs.organization }}
+        PACKAGE_NAME: ${{ inputs.package }}
+      run: |
+        set -euo pipefail
+        endpoint="https://api.github.com/orgs/${PACKAGE_ORG}/packages/container/${PACKAGE_NAME}/versions?per_page=100"
+        headers=(
+          -H "Authorization: Bearer ${GITHUB_TOKEN}"
+          -H "Accept: application/vnd.github+json"
+          -H "X-GitHub-Api-Version: 2022-11-28"
+        )
+
+        keep_id=""
+        for attempt in 1 2 3 4 5; do
+          versions="$(curl --fail-with-body --silent --show-error -L "${headers[@]}" "$endpoint")"
+          keep_id="$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(next((str(v["id"]) for v in data if "latest" in ((v.get("metadata",{}).get("container",{}).get("tags")) or [])), ""))' <<<"$versions")"
+          [[ "$keep_id" =~ ^[0-9]+$ ]] && break
+          sleep 2
+        done
+        [[ "$keep_id" =~ ^[0-9]+$ ]] || { echo "latest GHCR version was not visible after publish" >&2; exit 1; }
+
+        deleted=0
+        while :; do
+          versions="$(curl --fail-with-body --silent --show-error -L "${headers[@]}" "$endpoint")"
+          mapfile -t old_ids < <(python3 - "$keep_id" <<'PY' <<<"$versions"
+        PY
+          )
+          # The here-doc above cannot share stdin with the JSON body; use an
+          # environment-free parser invocation instead.
+          mapfile -t old_ids < <(printf '%s' "$versions" | python3 -c 'import json,sys; keep=int(sys.argv[1]); print("\n".join(str(v["id"]) for v in json.load(sys.stdin) if int(v["id"]) != keep))' "$keep_id")
+          ((${#old_ids[@]} > 0)) || break
+          for version_id in "${old_ids[@]}"; do
+            [[ "$version_id" =~ ^[0-9]+$ ]] || { echo "invalid package version id: $version_id" >&2; exit 1; }
+            curl --fail-with-body --silent --show-error -L -X DELETE "${headers[@]}" \
+              "https://api.github.com/orgs/${PACKAGE_ORG}/packages/container/${PACKAGE_NAME}/versions/${version_id}" >/dev/null
+            deleted=$((deleted + 1))
+          done
+        done
+
+        echo "GHCR retention complete: kept version ${keep_id} (latest), deleted ${deleted} superseded version(s)"

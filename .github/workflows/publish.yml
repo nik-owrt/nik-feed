@@ -13,6 +13,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  statuses: write
 
 concurrency:
   group: nik-feed-dev
@@ -27,11 +28,30 @@ env:
 
 jobs:
   preflight:
+    name: Validate feed inputs
     runs-on: [self-hosted, Linux, X64, nik-heavy]
     timeout-minutes: 5
     outputs:
       ready: ${{ steps.check.outputs.ready }}
     steps:
+      - name: Mark feed publish pending
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          payload="$(printf '{"state":"pending","target_url":"%s","description":"Feed publish is running","context":"feed/publish"}' "${RUN_URL}")"
+          curl --fail-with-body --silent --show-error -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
+            --data "${payload}"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -57,6 +77,7 @@ jobs:
           fi
 
   build:
+    name: Build feed snapshot
     needs: preflight
     if: needs.preflight.outputs.ready == 'true'
     runs-on: [self-hosted, Linux, X64, nik-heavy]
@@ -134,6 +155,7 @@ jobs:
           rm -f "$RUNNER_TEMP/nik-feed.sec"
 
   deploy:
+    name: Deploy GitHub Pages
     needs: build
     if: needs.build.result == 'success'
     runs-on: [self-hosted, Linux, X64, nik-heavy]
@@ -145,3 +167,55 @@ jobs:
       - name: Deploy Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+  report:
+    name: Report feed publish result
+    if: always()
+    needs: [preflight, build, deploy]
+    runs-on: [self-hosted, Linux, X64, nik-heavy]
+    timeout-minutes: 5
+    steps:
+      - name: Write feed pipeline summary
+        env:
+          READY: ${{ needs.preflight.outputs.ready }}
+          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+        shell: bash
+        run: |
+          printf '## Feed pipeline\n\n| Stage | Result |\n|---|---|\n| Preflight | %s |\n| Bootstrap ready | %s |\n| Build | %s |\n| Deploy | %s |\n' "${PREFLIGHT_RESULT}" "${READY:-false}" "${BUILD_RESULT}" "${DEPLOY_RESULT}" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Publish feed commit status
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          READY: ${{ needs.preflight.outputs.ready }}
+          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+        shell: bash
+        run: |
+          if [[ "${PREFLIGHT_RESULT}" != success ]]; then
+            state=failure
+            description="Feed preflight failed (${PREFLIGHT_RESULT})"
+          elif [[ "${READY}" != true ]]; then
+            state=success
+            description='Feed publish skipped: bootstrap incomplete'
+          elif [[ "${BUILD_RESULT}" == success && "${DEPLOY_RESULT}" == success ]]; then
+            state=success
+            description='Feed publish succeeded'
+          else
+            state=failure
+            description="Feed publish failed (${BUILD_RESULT}/${DEPLOY_RESULT})"
+          fi
+          payload="$(printf '{"state":"%s","target_url":"%s","description":"%s","context":"feed/publish"}' "${state}" "${RUN_URL}" "${description}")"
+          curl --fail-with-body --silent --show-error -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
+            --data "${payload}"

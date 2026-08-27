@@ -4,16 +4,13 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-  repository_dispatch:
-    types: [package-published]
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '*/5 * * * *'
 
 permissions:
   contents: read
   pages: write
   id-token: write
-  statuses: write
 
 concurrency:
   group: nik-feed-dev
@@ -23,79 +20,38 @@ env:
   CHANNEL: dev
   OPENWRT_VERSION: '24.10.4'
   PACKAGE_ARCH: aarch64_cortex-a53
-  KEEP_VERSIONS: '1'
   FEED_BASE_URL: https://nik-owrt.github.io/nik-feed
 
 jobs:
-  preflight:
-    name: Validate feed inputs
-    runs-on: [self-hosted, Linux, X64, nik-heavy]
-    timeout-minutes: 5
-    outputs:
-      ready: ${{ steps.check.outputs.ready }}
-    steps:
-      - name: Mark feed publish pending
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        shell: bash
-        run: |
-          payload="$(printf '{"state":"pending","target_url":"%s","description":"Feed publish is running","context":"feed/publish"}' "${RUN_URL}")"
-          curl --fail-with-body --silent --show-error -X POST \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
-            --data "${payload}"
-
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Check bootstrap state
-        id: check
-        shell: bash
-        env:
-          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
-          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
-          NIK_FEED_SIGNING_KEY: ${{ secrets.NIK_FEED_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          ready=true
-          [[ -n "$GHCR_USERNAME" ]] || ready=false
-          [[ -n "$GHCR_READ_TOKEN" ]] || ready=false
-          [[ -n "$NIK_FEED_SIGNING_KEY" ]] || ready=false
-          [[ -s keys/nik-feed.pub ]] || ready=false
-          echo "ready=$ready" >> "$GITHUB_OUTPUT"
-          if [[ "$ready" != true ]]; then
-            echo 'Feed bootstrap is incomplete; publish is skipped cleanly.'
-          fi
-
   build:
-    name: Build feed snapshot
-    needs: preflight
-    if: needs.preflight.outputs.ready == 'true'
+    name: Build feed from package artifacts
     runs-on: [self-hosted, Linux, X64, nik-heavy]
     timeout-minutes: 30
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
 
-      - name: Authenticate to GHCR
-        shell: bash
+      - name: Validate feed credentials
         env:
           GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
           GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          NIK_ARTIFACT_READ_TOKEN: ${{ secrets.NIK_ARTIFACT_READ_TOKEN || secrets.GHCR_READ_TOKEN }}
+          NIK_FEED_SIGNING_KEY: ${{ secrets.NIK_FEED_SIGNING_KEY }}
+        shell: bash
         run: |
           set -euo pipefail
-          printf '%s' "$GHCR_READ_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+          [[ -n "$GHCR_USERNAME" && -n "$GHCR_READ_TOKEN" ]]
+          [[ -n "$NIK_ARTIFACT_READ_TOKEN" ]]
+          [[ -n "$NIK_FEED_SIGNING_KEY" ]]
+          [[ -s keys/nik-feed.pub ]]
+
+      - name: Authenticate to GHCR for platform SDK reads
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.GHCR_USERNAME }}
+          password: ${{ secrets.GHCR_READ_TOKEN }}
 
       - name: Resolve current immutable SDK
         id: platform
@@ -106,17 +62,15 @@ jobs:
           docker pull "$pair" >/dev/null
           sdk="$(docker image inspect --format '{{ index .Config.Labels "org.nik-link.sdk-reference" }}' "$pair")"
           pbid="$(docker image inspect --format '{{ index .Config.Labels "org.nik-link.platform-build-id" }}' "$pair")"
-          [[ "$sdk" =~ ^ghcr\.io/nik-owrt/openwrt-sdk@sha256:[0-9a-f]{64}$ ]] || { echo 'invalid SDK reference' >&2; exit 1; }
-          [[ "$pbid" =~ ^[0-9a-f]{12}$ ]] || { echo 'invalid platform build ID' >&2; exit 1; }
-          echo "SDK_REFERENCE=$sdk" >> "$GITHUB_ENV"
-          echo "PLATFORM_BUILD_ID=$pbid" >> "$GITHUB_ENV"
-          echo "pbid=$pbid" >> "$GITHUB_OUTPUT"
+          [[ "$sdk" =~ ^ghcr\.io/nik-owrt/openwrt-sdk@sha256:[0-9a-f]{64}$ ]]
+          [[ "$pbid" =~ ^[0-9a-f]{12}$ ]]
           docker pull "$sdk" >/dev/null
+          printf '%s\n' "SDK_REFERENCE=$sdk" "PLATFORM_BUILD_ID=$pbid" >> "$GITHUB_ENV"
 
       - name: Materialize signing key
-        shell: bash
         env:
           NIK_FEED_SIGNING_KEY: ${{ secrets.NIK_FEED_SIGNING_KEY }}
+        shell: bash
         run: |
           set -euo pipefail
           key="$RUNNER_TEMP/nik-feed.sec"
@@ -124,7 +78,9 @@ jobs:
           chmod 600 "$key"
           echo "SIGNING_KEY_FILE=$key" >> "$GITHUB_ENV"
 
-      - name: Build rolling feed snapshot
+      - name: Build rolling signed feed
+        env:
+          NIK_ARTIFACT_READ_TOKEN: ${{ secrets.NIK_ARTIFACT_READ_TOKEN || secrets.GHCR_READ_TOKEN }}
         shell: bash
         run: bash scripts/sync-feed.sh "$GITHUB_WORKSPACE/public"
 
@@ -134,30 +90,28 @@ jobs:
           set -euo pipefail
           leaf="dev/${OPENWRT_VERSION}/${PACKAGE_ARCH}"
           cat > public/index.html <<EOF
-          <!doctype html>
-          <html lang="en"><head><meta charset="utf-8"><title>NIK OpenWrt feed</title></head>
-          <body><h1>NIK OpenWrt OPKG feed</h1><p>Channel: dev</p><p>Retention: exactly one current version per package.</p><p><a href="${leaf}/Packages.gz">Packages.gz</a></p><p><a href="${leaf}/feed.json">feed.json</a></p></body></html>
+          <!doctype html><html lang="en"><head><meta charset="utf-8"><title>NIK OpenWrt feed</title></head><body>
+          <h1>NIK OpenWrt OPKG feed</h1>
+          <p>Storage: GitHub Actions package artifacts.</p>
+          <p>Retention: exactly one current version per package.</p>
+          <p><a href="${leaf}/Packages.gz">Packages.gz</a></p>
+          <p><a href="${leaf}/feed.json">feed.json</a></p>
+          </body></html>
           EOF
 
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
-
+      - uses: actions/configure-pages@v5
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
         with:
           path: public
-
-      - name: Logout and remove signing key
+      - name: Cleanup signing key
         if: always()
         shell: bash
-        run: |
-          docker logout ghcr.io >/dev/null 2>&1 || true
-          rm -f "$RUNNER_TEMP/nik-feed.sec"
+        run: rm -f "$RUNNER_TEMP/nik-feed.sec"
 
   deploy:
     name: Deploy GitHub Pages
     needs: build
-    if: needs.build.result == 'success'
     runs-on: [self-hosted, Linux, X64, nik-heavy]
     timeout-minutes: 10
     environment:
@@ -167,55 +121,3 @@ jobs:
       - name: Deploy Pages
         id: deployment
         uses: actions/deploy-pages@v4
-
-  report:
-    name: Report feed publish result
-    if: always()
-    needs: [preflight, build, deploy]
-    runs-on: [self-hosted, Linux, X64, nik-heavy]
-    timeout-minutes: 5
-    steps:
-      - name: Write feed pipeline summary
-        env:
-          READY: ${{ needs.preflight.outputs.ready }}
-          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
-          BUILD_RESULT: ${{ needs.build.result }}
-          DEPLOY_RESULT: ${{ needs.deploy.result }}
-        shell: bash
-        run: |
-          printf '## Feed pipeline\n\n| Stage | Result |\n|---|---|\n| Preflight | %s |\n| Bootstrap ready | %s |\n| Build | %s |\n| Deploy | %s |\n' "${PREFLIGHT_RESULT}" "${READY:-false}" "${BUILD_RESULT}" "${DEPLOY_RESULT}" >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Publish feed commit status
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
-          HEAD_SHA: ${{ github.sha }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          READY: ${{ needs.preflight.outputs.ready }}
-          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
-          BUILD_RESULT: ${{ needs.build.result }}
-          DEPLOY_RESULT: ${{ needs.deploy.result }}
-        shell: bash
-        run: |
-          if [[ "${PREFLIGHT_RESULT}" != success ]]; then
-            state=failure
-            description="Feed preflight failed (${PREFLIGHT_RESULT})"
-          elif [[ "${READY}" != true ]]; then
-            state=success
-            description='Feed publish skipped: bootstrap incomplete'
-          elif [[ "${BUILD_RESULT}" == success && "${DEPLOY_RESULT}" == success ]]; then
-            state=success
-            description='Feed publish succeeded'
-          else
-            state=failure
-            description="Feed publish failed (${BUILD_RESULT}/${DEPLOY_RESULT})"
-          fi
-          payload="$(printf '{"state":"%s","target_url":"%s","description":"%s","context":"feed/publish"}' "${state}" "${RUN_URL}" "${description}")"
-          curl --fail-with-body --silent --show-error -X POST \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
-            --data "${payload}"

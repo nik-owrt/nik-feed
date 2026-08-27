@@ -1,4 +1,4 @@
-name: Bootstrap local feed signing key
+name: Bootstrap local feed host
 
 on:
   workflow_dispatch:
@@ -13,13 +13,13 @@ permissions:
 
 concurrency:
   group: nik-feed-local-bootstrap
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   bootstrap:
-    name: Bootstrap local signing key
+    name: Bootstrap local feed host
     runs-on: [self-hosted, Linux, X64, nik-heavy]
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -85,3 +85,10 @@ jobs:
           mkdir -p "$feed_root/served" "$feed_root/releases"
           chmod 700 "$key_dir"
           printf 'Local feed signing key installed: %s\nLocal feed root: %s\n' "$key_file" "$feed_root"
+
+      - name: Ensure LAN HTTP server
+        env:
+          NIK_LOCAL_FEED_ROOT: ${{ vars.NIK_LOCAL_FEED_ROOT }}
+          NIK_LOCAL_FEED_BIND: ${{ vars.NIK_LOCAL_FEED_BIND }}
+        shell: bash
+        run: bash scripts/ensure-local-http-server.sh

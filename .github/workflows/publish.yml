@@ -1,11 +1,9 @@
-name: Publish OPKG dev feed
+name: Retire public package feed
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
-  schedule:
-    - cron: '*/5 * * * *'
 
 permissions:
   contents: read
@@ -13,104 +11,44 @@ permissions:
   id-token: write
 
 concurrency:
-  group: nik-feed-dev
-  cancel-in-progress: false
-
-env:
-  CHANNEL: dev
-  OPENWRT_VERSION: '24.10.4'
-  PACKAGE_ARCH: aarch64_cortex-a53
-  FEED_BASE_URL: https://nik-owrt.github.io/nik-feed
+  group: nik-feed-public-retirement
+  cancel-in-progress: true
 
 jobs:
   build:
-    name: Build feed from package artifacts
+    name: Publish package-free tombstone
     runs-on: [self-hosted, Linux, X64, nik-heavy]
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          persist-credentials: false
-
-      - name: Validate feed credentials
-        env:
-          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
-          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
-          NIK_ARTIFACT_READ_TOKEN: ${{ secrets.NIK_ARTIFACT_READ_TOKEN || secrets.GHCR_READ_TOKEN }}
-          NIK_FEED_SIGNING_KEY: ${{ secrets.NIK_FEED_SIGNING_KEY }}
+      - name: Build empty public site
         shell: bash
         run: |
           set -euo pipefail
-          [[ -n "$GHCR_USERNAME" && -n "$GHCR_READ_TOKEN" ]]
-          [[ -n "$NIK_ARTIFACT_READ_TOKEN" ]]
-          [[ -n "$NIK_FEED_SIGNING_KEY" ]]
-          [[ -s keys/nik-feed.pub ]]
-
-      - name: Authenticate to GHCR for platform SDK reads
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
-        with:
-          registry: ghcr.io
-          username: ${{ secrets.GHCR_USERNAME }}
-          password: ${{ secrets.GHCR_READ_TOKEN }}
-
-      - name: Resolve current immutable SDK
-        id: platform
-        shell: bash
-        run: |
-          set -euo pipefail
-          pair='ghcr.io/nik-owrt/openwrt-platform-pair:sy-fb-r3000-latest'
-          docker pull "$pair" >/dev/null
-          sdk="$(docker image inspect --format '{{ index .Config.Labels "org.nik-link.sdk-reference" }}' "$pair")"
-          pbid="$(docker image inspect --format '{{ index .Config.Labels "org.nik-link.platform-build-id" }}' "$pair")"
-          [[ "$sdk" =~ ^ghcr\.io/nik-owrt/openwrt-sdk@sha256:[0-9a-f]{64}$ ]]
-          [[ "$pbid" =~ ^[0-9a-f]{12}$ ]]
-          docker pull "$sdk" >/dev/null
-          printf '%s\n' "SDK_REFERENCE=$sdk" "PLATFORM_BUILD_ID=$pbid" >> "$GITHUB_ENV"
-
-      - name: Materialize signing key
-        env:
-          NIK_FEED_SIGNING_KEY: ${{ secrets.NIK_FEED_SIGNING_KEY }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          key="$RUNNER_TEMP/nik-feed.sec"
-          printf '%s\n' "$NIK_FEED_SIGNING_KEY" > "$key"
-          chmod 600 "$key"
-          echo "SIGNING_KEY_FILE=$key" >> "$GITHUB_ENV"
-
-      - name: Build rolling signed feed
-        env:
-          NIK_ARTIFACT_READ_TOKEN: ${{ secrets.NIK_ARTIFACT_READ_TOKEN || secrets.GHCR_READ_TOKEN }}
-        shell: bash
-        run: bash scripts/sync-feed.sh "$GITHUB_WORKSPACE/public"
-
-      - name: Build landing page
-        shell: bash
-        run: |
-          set -euo pipefail
-          leaf="dev/${OPENWRT_VERSION}/${PACKAGE_ARCH}"
-          cat > public/index.html <<EOF
-          <!doctype html><html lang="en"><head><meta charset="utf-8"><title>NIK OpenWrt feed</title></head><body>
-          <h1>NIK OpenWrt OPKG feed</h1>
-          <p>Storage: GitHub Actions package artifacts.</p>
-          <p>Retention: exactly one current version per package.</p>
-          <p><a href="${leaf}/Packages.gz">Packages.gz</a></p>
-          <p><a href="${leaf}/feed.json">feed.json</a></p>
-          </body></html>
+          rm -rf public
+          mkdir -p public
+          cat > public/index.html <<'EOF'
+          <!doctype html>
+          <html lang="en">
+          <head><meta charset="utf-8"><title>NIK OpenWrt package feed</title></head>
+          <body>
+            <h1>NIK OpenWrt package feed</h1>
+            <p>Runtime br-*/fr-* packages are no longer published on GitHub Pages.</p>
+          </body>
+          </html>
           EOF
+          touch public/.nojekyll
+          test "$(find public -type f -name '*.ipk' | wc -l)" -eq 0
+          test ! -e public/dev
 
       - uses: actions/configure-pages@v5
-      - name: Upload Pages artifact
+
+      - name: Upload package-free Pages site
         uses: actions/upload-pages-artifact@v4
         with:
           path: public
-      - name: Cleanup signing key
-        if: always()
-        shell: bash
-        run: rm -f "$RUNNER_TEMP/nik-feed.sec"
 
   deploy:
-    name: Deploy GitHub Pages
+    name: Remove public OPKG payload
     needs: build
     runs-on: [self-hosted, Linux, X64, nik-heavy]
     timeout-minutes: 10
@@ -118,6 +56,6 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Deploy Pages
+      - name: Deploy package-free Pages site
         id: deployment
         uses: actions/deploy-pages@v4

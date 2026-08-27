@@ -1,77 +1,139 @@
 # nik-feed
 
-Public signed OPKG feed for NIK OpenWrt 24.10.4 development packages.
+Local-only signed OPKG feed for NIK OpenWrt 24.10.4 development packages.
 
-## Feed URL
+Runtime `br-*` / `fr-*` IPKs are intentionally not published to GHCR, GitHub Actions artifacts, releases, or GitHub Pages. GitHub remains source control and CI orchestration; the self-hosted build machine is the package publisher and storage host.
 
-```text
-https://nik-owrt.github.io/nik-feed/dev/24.10.4/aarch64_cortex-a53
-```
-
-Router configuration:
-
-```sh
-src/gz nik_dev https://nik-owrt.github.io/nik-feed/dev/24.10.4/aarch64_cortex-a53
-```
-
-The production firmware ships this URL in `/etc/opkg/customfeeds.conf` together with the NIK usign public key, so a router can update a single module independently:
-
-```sh
-opkg update
-opkg upgrade fr-wifi
-```
-
-No firmware rebuild is required when only a compatible NIK package changes.
-
-## Trust model
-
-The NIK feed public key is a firmware trust anchor. Routers receive it from the firmware image as `/etc/opkg/keys/de2c9e01106fbc10`; the feed never bootstraps its own trust.
-
-The repository keeps `keys/nik-feed.pub` only so CI can verify the signature it just created. The Pages artifact intentionally does not publish that key.
-
-The private signing key exists only as the `NIK_FEED_SIGNING_KEY` GitHub Actions secret and must never be committed or included in firmware.
-
-## Publishing model
-
-Package repositories publish OCI images such as:
+## Data flow
 
 ```text
-ghcr.io/nik-owrt/openwrt-package-fr-wifi:latest
+package repository
+  -> self-hosted GitHub Actions runner
+  -> validate
+  -> build one IPK
+  -> validate final IPK/payload
+  -> local nik-feed publisher
+  -> signed local OPKG index
+  -> LAN HTTP server
+  -> OpenWrt opkg
 ```
 
-The feed is a rolling snapshot, not a package archive:
+The public GitHub Pages deployment is only a package-free tombstone. It must never contain `*.ipk`, `Packages`, `Packages.gz`, `Packages.manifest`, or `Packages.sig`.
 
-1. Resolve the current NIK SDK/platform generation used to sign and index the feed.
-2. Read package compatibility policy from `config/compatibility.json`.
-3. Resolve `architecture-all` modules from their independent `:latest` aliases.
-4. Resolve ABI-sensitive packages such as `br-core` from `compat-<userspace-abi-id>`.
-5. Replace only the package that has a newer compatible artifact; unrelated packages remain untouched.
-6. Enforce exactly one IPK per package.
-7. Validate real IPK architecture (`all` for independent modules; platform arch for ABI-sensitive modules).
-8. Generate and sign `Packages`, `Packages.gz`, `Packages.manifest` and `Packages.sig` with the current immutable NIK SDK.
-9. Generate `feed.json` containing feed-generation PBID/SDK plus per-package version, dependencies, SHA-256, source PBID, source SDK, compatibility mode and immutable OCI digest.
-10. Atomically deploy the clean snapshot to GitHub Pages.
+## Local storage
 
-This means a new `fr-wifi` can be built and published later and become immediately available through `opkg upgrade fr-wifi` without rebuilding firmware. PBID and SDK remain provenance; only packages whose compatibility mode requires platform ABI matching are locked to a compatibility generation.
+Default persistent root on the self-hosted Linux runner:
 
-If a compatible package publication is temporarily unavailable, the feed may retain its previous compatible package. It still retains at most one version of that package.
+```text
+$HOME/nik-owrt-feed/
+├── .publish.lock
+├── releases/
+│   └── dev/24.10.4/aarch64_cortex-a53/<immutable-release>/
+└── served/
+    └── dev/24.10.4/aarch64_cortex-a53 -> <immutable-release>
+```
 
-The workflow runs every 15 minutes as a fallback and accepts `repository_dispatch` event `package-published` for immediate publishing.
+`served/` is the only tree the LAN HTTP server exposes. The live architecture directory is an atomic symlink to an immutable release snapshot, so `opkg` cannot observe a half-updated package index.
 
-## Required secrets
+Override the root with repository/organization Actions variable `NIK_LOCAL_FEED_ROOT` when required.
 
-Repository `nik-owrt/nik-feed` requires:
+## Publication contract
 
-- `GHCR_USERNAME` — GitHub username that owns the GHCR read token.
-- `GHCR_READ_TOKEN` — classic PAT with `read:packages`, authorized for the private NIK package images.
-- `NIK_FEED_SIGNING_KEY` — private `usign` key. Never commit this value.
+The reusable composite action is:
 
-Commit only the matching public key as:
+```text
+nik-owrt/nik-feed/.github/actions/publish-local@<immutable-commit-sha>
+```
+
+Each package workflow passes its validated `.artifacts/packages` directory and the exact immutable SDK reference used for the build.
+
+`scripts/publish-local-package.sh`:
+
+1. requires exactly one `<package>_*.ipk` plus `package-build.json`;
+2. verifies package name, immutable SDK reference, platform build ID, filename and SHA-256;
+3. derives the userspace compatibility ID from the immutable SDK platform manifest;
+4. takes a host-wide `flock` so package workflows from different GitHub repositories cannot race;
+5. copies the previous live snapshot into a staging release;
+6. removes the previous version of only the package being replaced;
+7. invalidates ABI-sensitive packages if the userspace compatibility generation changed;
+8. regenerates `Packages.manifest`, `Packages`, `Packages.gz` with OpenWrt tools from the immutable SDK;
+9. signs and immediately verifies `Packages.sig` with `usign`;
+10. generates `feed.json` with provenance and missing-package state;
+11. atomically switches the live symlink to the complete immutable release;
+12. keeps the live snapshot plus two non-served rollback snapshots.
+
+The served feed therefore contains at most one current version of every package.
+
+## Compatibility
+
+`config/compatibility.json` defines the policy. The default is `architecture-all`; currently `br-core` uses `userspace-abi-v1` and is invalidated automatically when the SDK userspace ABI identity changes.
+
+The active package set is `config/packages.txt` and currently contains 23 packages.
+
+## Signing key
+
+The firmware public key remains the trust anchor. The matching public key is committed as:
 
 ```text
 keys/nik-feed.pub
 ```
 
-## Active package set
+The private key is never committed and is never served over HTTP.
 
-See `config/packages.txt`. Archived or empty placeholder repositories are intentionally excluded.
+One-time bootstrap copies the existing `NIK_FEED_SIGNING_KEY` repository secret onto the trusted self-hosted runner only after a sign+verify check against `keys/nik-feed.pub`:
+
+```text
+$HOME/.config/nik-feed/nik-feed.key
+```
+
+Override that path with `NIK_FEED_SIGNING_KEY_FILE` if required. Package repositories do not need to own the signing secret once the local runner has been bootstrapped.
+
+## LAN HTTP server
+
+The helper below keeps an nginx container running locally and exposes only the `served/` tree:
+
+```sh
+bash scripts/ensure-local-http-server.sh
+```
+
+Defaults:
+
+```text
+bind:      0.0.0.0:8080
+container: nik-local-feed
+root:      $HOME/nik-owrt-feed/served
+```
+
+To bind to one LAN address instead:
+
+```sh
+NIK_LOCAL_FEED_BIND=192.168.1.100:8080 bash scripts/ensure-local-http-server.sh
+```
+
+The PC does not need a public IP, inbound NAT/port-forwarding, or VPN. Restrict the selected TCP port to the trusted LAN in the host firewall.
+
+If the Linux runner is inside a VM/WSL/container network, verify that the LAN can reach the published host port; the OPKG URL must use an address routable from the router.
+
+## Router configuration
+
+If the build host is reachable as `192.168.1.100:8080`, the feed leaf is:
+
+```text
+http://192.168.1.100:8080/dev/24.10.4/aarch64_cortex-a53
+```
+
+OpenWrt `/etc/opkg/customfeeds.conf`:
+
+```sh
+src/gz nik_dev http://192.168.1.100:8080/dev/24.10.4/aarch64_cortex-a53
+```
+
+Then individual modules can be updated without rebuilding firmware:
+
+```sh
+opkg update
+opkg list-upgradable
+opkg upgrade fr-wifi
+```
+
+When the build PC is offline, the local feed is simply unavailable; already installed packages and the firmware continue to operate.

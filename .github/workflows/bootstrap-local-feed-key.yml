@@ -1,0 +1,87 @@
+name: Bootstrap local feed signing key
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/bootstrap-local-feed-key.yml
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: nik-feed-local-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    name: Bootstrap local signing key
+    runs-on: [self-hosted, Linux, X64, nik-heavy]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Authenticate to GHCR for SDK reads
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Resolve immutable SDK
+        id: sdk
+        shell: bash
+        run: |
+          set -euo pipefail
+          pair='ghcr.io/nik-owrt/openwrt-platform-pair:sy-fb-r3000-latest'
+          docker pull "$pair" >/dev/null
+          sdk="$(docker image inspect --format '{{ index .Config.Labels "org.nik-link.sdk-reference" }}' "$pair")"
+          [[ "$sdk" =~ ^ghcr\.io/nik-owrt/openwrt-sdk@sha256:[0-9a-f]{64}$ ]]
+          docker pull "$sdk" >/dev/null
+          echo "sdk_reference=$sdk" >> "$GITHUB_OUTPUT"
+
+      - name: Install and verify local signing key
+        env:
+          NIK_FEED_SIGNING_KEY: ${{ secrets.NIK_FEED_SIGNING_KEY }}
+          NIK_LOCAL_FEED_ROOT: ${{ vars.NIK_LOCAL_FEED_ROOT }}
+          SDK_REFERENCE: ${{ steps.sdk.outputs.sdk_reference }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$NIK_FEED_SIGNING_KEY" ]] || { echo 'NIK_FEED_SIGNING_KEY is not configured for nik-feed' >&2; exit 1; }
+          key_dir="$HOME/.config/nik-feed"
+          key_file="$key_dir/nik-feed.key"
+          candidate="$key_dir/.nik-feed.key.$GITHUB_RUN_ID"
+          mkdir -p "$key_dir"
+          umask 077
+          printf '%s\n' "$NIK_FEED_SIGNING_KEY" > "$candidate"
+          chmod 600 "$candidate"
+
+          verify_dir="$(mktemp -d)"
+          trap 'rm -rf "$verify_dir" "$candidate"' EXIT
+          printf 'nik-feed local signing key verification\n' > "$verify_dir/message"
+          docker run --rm \
+            --mount "type=bind,src=$candidate,dst=/run/nik-feed.sec,readonly" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/keys/nik-feed.pub,dst=/run/nik-feed.pub,readonly" \
+            --mount "type=bind,src=$verify_dir,dst=/verify" \
+            "$SDK_REFERENCE" bash -lc '
+              set -euo pipefail
+              usign="$(find /opt/openwrt-sdk/staging_dir -type f -path "*/bin/usign" -perm -111 | head -n1)"
+              [[ -x "$usign" ]]
+              "$usign" -S -m /verify/message -s /run/nik-feed.sec -x /verify/message.sig
+              "$usign" -V -m /verify/message -p /run/nik-feed.pub -x /verify/message.sig
+            '
+
+          mv -f "$candidate" "$key_file"
+          chmod 600 "$key_file"
+          trap 'rm -rf "$verify_dir"' EXIT
+          rm -rf "$verify_dir"
+
+          feed_root="${NIK_LOCAL_FEED_ROOT:-$HOME/nik-owrt-feed}"
+          mkdir -p "$feed_root/served" "$feed_root/releases"
+          chmod 700 "$key_dir"
+          printf 'Local feed signing key installed: %s\nLocal feed root: %s\n' "$key_file" "$feed_root"

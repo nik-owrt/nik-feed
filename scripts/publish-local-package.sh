@@ -9,8 +9,11 @@ channel="${NIK_PUBLISH_CHANNEL:-dev}"
 openwrt_version="${NIK_PUBLISH_OPENWRT_VERSION:-24.10.4}"
 feed_arch="${NIK_PUBLISH_PACKAGE_ARCH:-aarch64_cortex-a53}"
 feed_root="${NIK_PUBLISH_FEED_ROOT:-${NIK_LOCAL_FEED_ROOT:-/mnt/d/nik-feed}}"
+state_root="${NIK_PUBLISH_STATE_ROOT:-${NIK_LOCAL_FEED_STATE_ROOT:-/mnt/d/nik-feed-state}}"
+signing_key_file="${NIK_PUBLISH_SIGNING_KEY_FILE:-${NIK_FEED_SIGNING_KEY_FILE:-$state_root/keys/nik-feed.key}}"
+public_key_file="$repo_root/keys/nik-feed.pub"
 packages_file="$repo_root/config/packages.txt"
-lock_file="${NIK_PUBLISH_LOCK_FILE:-/tmp/nik-feed.publish.lock}"
+lock_file="${NIK_PUBLISH_LOCK_FILE:-$state_root/locks/publish.lock}"
 
 fail() {
   echo "local feed publish: $*" >&2
@@ -21,6 +24,8 @@ fail() {
 [[ "$sdk_reference" =~ ^ghcr\.io/nik-owrt/openwrt-sdk@sha256:[0-9a-f]{64}$ ]] || fail "invalid immutable SDK reference"
 [[ -d "$source_dir" ]] || fail "package directory does not exist: $source_dir"
 [[ -s "$packages_file" ]] || fail "missing package contract: $packages_file"
+[[ -s "$public_key_file" ]] || fail "missing feed public key: $public_key_file"
+[[ -s "$signing_key_file" ]] || fail "missing feed signing key: $signing_key_file"
 
 for cmd in docker flock python3; do
   command -v "$cmd" >/dev/null || fail "required command is missing: $cmd"
@@ -65,43 +70,82 @@ docker image inspect "$sdk_reference" >/dev/null 2>&1 || docker pull "$sdk_refer
 sdk_pbid="$(docker image inspect --format '{{ index .Config.Labels "org.nik-link.platform-build-id" }}' "$sdk_reference")"
 [[ "$sdk_pbid" == "$meta_pbid" ]] || fail "SDK/platform build id mismatch"
 
-# The Windows D: feed is mounted in WSL as /mnt/d/nik-feed. Fail here with an
-# actionable error rather than later inside Docker/index generation.
-mkdir -p "$feed_root" || fail "cannot create feed root: $feed_root"
+# The Windows D: feed and its private state are persistent WSL mounts.
+mkdir -p "$feed_root" "$state_root/locks" || fail "cannot create feed/state directories"
 probe="$feed_root/.nik-feed-write-probe.$$"
 : > "$probe" || fail "feed root is not writable: $feed_root"
 rm -f "$probe"
 
-# Lock in the Linux filesystem instead of DrvFS. All package repositories on
-# this self-hosted runner therefore serialize publication through one host-wide lock.
 exec 9>"$lock_file"
 flock 9
 
 leaf_rel="$channel/$openwrt_version/$feed_arch"
-live="$feed_root/$leaf_rel"
-mkdir -p "$live"
-work="$(mktemp -d "$feed_root/.publish-${package}.XXXXXX")"
-cleanup() { rm -rf "$work" 2>/dev/null || true; }
+release_parent="$feed_root/releases/$leaf_rel"
+served_parent="$feed_root/served/$channel/$openwrt_version"
+live="$served_parent/$feed_arch"
+legacy_live="$feed_root/$leaf_rel"
+mkdir -p "$release_parent" "$served_parent"
+[[ ! -e "$live" || -L "$live" ]] || fail "live feed path is not a symlink: $live"
+
+work="$(mktemp -d "$release_parent/.staging-${package}.XXXXXX")"
+next_link=""
+cleanup() {
+  [[ -z "$next_link" ]] || rm -f "$next_link" 2>/dev/null || true
+  [[ -z "$work" ]] || rm -rf "$work" 2>/dev/null || true
+}
 trap cleanup EXIT
 
 # Candidate snapshot = current live packages with exactly this package replaced.
-find "$live" -maxdepth 1 -type f -name '*.ipk' -exec cp -f {} "$work/" \;
+if [[ -L "$live" ]]; then
+  current_target="$(readlink -f "$live")"
+  [[ -d "$current_target" ]] || fail "live feed symlink is broken: $live"
+  cp -a "$current_target/." "$work/"
+elif [[ -d "$legacy_live" ]]; then
+  cp -a "$legacy_live/." "$work/"
+fi
+mkdir -p "$work/.meta"
 find "$work" -maxdepth 1 -type f -name "${package}_*.ipk" -delete
+rm -f "$work/.meta/${package}.json"
 cp -f "$ipk" "$work/$(basename "$ipk")"
+
+python3 - "$work/.meta/${package}.json" "$package" "$sdk_reference" "$meta_pbid" "$actual_sha" "$(basename "$ipk")" <<'PY'
+import json, os, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+package, sdk, pbid, sha256, filename = sys.argv[2:]
+path.write_text(json.dumps({
+    'package': package,
+    'source_repository': os.environ.get('GITHUB_REPOSITORY', f'nik-owrt/{package}'),
+    'source_commit': os.environ.get('GITHUB_SHA', 'local'),
+    'workflow_run_id': os.environ.get('GITHUB_RUN_ID', '0'),
+    'workflow_run_attempt': os.environ.get('GITHUB_RUN_ATTEMPT', '0'),
+    'source_sdk_reference': sdk,
+    'source_platform_build_id': pbid,
+    'filename': filename,
+    'sha256': sha256,
+}, indent=2) + '\n')
+PY
 
 # The immutable SDK owns ipkg-make-index and mkhash. Host WSL does not need
 # usign, jq, gzip, or an OpenWrt build tree.
 docker run --rm \
   --mount "type=bind,src=$work,dst=/feed" \
+  --mount "type=bind,src=$signing_key_file,dst=/run/nik-feed.sec,readonly" \
+  --mount "type=bind,src=$public_key_file,dst=/run/nik-feed.pub,readonly" \
   "$sdk_reference" bash -lc '
     set -euo pipefail
     cd /feed
     mkhash="$(find /opt/openwrt-sdk/staging_dir -type f -path "*/bin/mkhash" -perm -111 | head -n1)"
+    usign="$(find /opt/openwrt-sdk/staging_dir -type f -path "*/bin/usign" -perm -111 | head -n1)"
     [[ -x "$mkhash" ]] || { echo "SDK mkhash not found" >&2; exit 1; }
+    [[ -x "$usign" ]] || { echo "SDK usign not found" >&2; exit 1; }
     [[ -x /opt/openwrt-sdk/scripts/ipkg-make-index.sh ]] || { echo "SDK ipkg-make-index.sh not found" >&2; exit 1; }
     MKHASH="$mkhash" /opt/openwrt-sdk/scripts/ipkg-make-index.sh . > Packages.manifest
     grep -vE "^(Maintainer|LicenseFiles|Source|SourceName|Require|SourceDateEpoch)" Packages.manifest > Packages
     gzip -9nc Packages > Packages.gz
+    "$usign" -S -m Packages -s /run/nik-feed.sec -x Packages.sig
+    "$usign" -V -m Packages -p /run/nik-feed.pub -x Packages.sig
   '
 
 python3 - "$work" "$packages_file" "$channel" "$openwrt_version" "$feed_arch" "$meta_pbid" "$sdk_reference" <<'PY'
@@ -139,7 +183,10 @@ for stanza in text.strip().split('\n\n') if text.strip() else []:
     ipk = leaf / filename
     if not ipk.is_file():
         raise SystemExit(f'index references missing IPK: {filename}')
+    metadata_path = leaf / '.meta' / f'{name}.json'
+    metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else {}
     items.append({
+        **metadata,
         'package': name,
         'version': fields.get('Version', ''),
         'architecture': fields.get('Architecture', ''),
@@ -156,7 +203,7 @@ if len(seen) != len(set(seen)):
 missing = [p for p in expected if p not in set(seen)]
 feed = {
     'schema_version': 3,
-    'storage': 'windows-local-unsigned',
+    'storage': 'local-self-hosted',
     'channel': channel,
     'openwrt_version': openwrt,
     'architecture': arch,
@@ -172,46 +219,38 @@ feed = {
 (leaf / 'feed.json').write_text(json.dumps(feed, indent=2) + '\n')
 PY
 
-# New IPKs first, index last. Thus Packages.gz never references a file that has
-# not reached the HTTP directory yet.
-for candidate in "$work"/*.ipk; do
-  [[ -e "$candidate" ]] || continue
-  base="$(basename "$candidate")"
-  cp -f "$candidate" "$live/.${base}.new"
-  mv -f "$live/.${base}.new" "$live/$base"
-done
+[[ -s "$work/Packages" && -s "$work/Packages.gz" && -s "$work/Packages.sig" ]] || fail "signed feed index is incomplete"
+cp -f "$public_key_file" "$work/nik-feed.pub"
 
-for meta_file in Packages.manifest Packages feed.json; do
-  cp -f "$work/$meta_file" "$live/.${meta_file}.new"
-  mv -f "$live/.${meta_file}.new" "$live/$meta_file"
-done
-cp -f "$work/Packages.gz" "$live/.Packages.gz.new"
-mv -f "$live/.Packages.gz.new" "$live/Packages.gz"
+release_id="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-${package}-$$"
+final_release="$release_parent/$release_id"
+mv "$work" "$final_release"
+work=""
 
-# Remove obsolete IPKs only after the new index is live.
-python3 - "$live" "$work/Packages" <<'PY'
-import re, sys
-from pathlib import Path
-live = Path(sys.argv[1])
-packages = Path(sys.argv[2]).read_text()
-keep = set()
-for line in packages.splitlines():
-    if line.startswith('Filename: '):
-        keep.add(line.split(': ', 1)[1].removeprefix('./'))
-for ipk in live.glob('*.ipk'):
-    if ipk.name not in keep:
-        ipk.unlink()
+relative_target="$(python3 - "$served_parent" "$final_release" <<'PY'
+import os, sys
+print(os.path.relpath(sys.argv[2], sys.argv[1]))
 PY
+)"
+next_link="$served_parent/.${feed_arch}.next-$$"
+ln -s "$relative_target" "$next_link"
+mv -Tf "$next_link" "$live"
+next_link=""
 
-rm -f "$live/Packages.sig" "$live/nik-feed.pub"
+# Keep the live snapshot and two rollback snapshots. Version values are never
+# generated or modified here; the ready-built IPK remains the source of truth.
+mapfile -t releases < <(find "$release_parent" -mindepth 1 -maxdepth 1 -type d ! -name '.staging-*' -printf '%T@ %p\n' | LC_ALL=C sort -nr | cut -d' ' -f2-)
+if (( ${#releases[@]} > 3 )); then
+  for old in "${releases[@]:3}"; do rm -rf "$old"; done
+fi
 
-read -r available expected < <(python3 - "$live/feed.json" <<'PY'
+read -r available expected < <(python3 - "$final_release/feed.json" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1]))
 print(m['available_packages'], m['expected_packages'])
 PY
 )
-printf 'local feed published: %s (%s/%s packages)\n' "$live" "$available" "$expected"
+printf 'local feed published: %s -> %s (%s/%s packages)\n' "$live" "$relative_target" "$available" "$expected"
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   printf 'feed_path=%s\nfeed_leaf=%s\n' "$live" "$leaf_rel" >> "$GITHUB_OUTPUT"
 fi

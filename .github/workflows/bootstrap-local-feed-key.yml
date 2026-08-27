@@ -48,12 +48,14 @@ jobs:
         env:
           NIK_FEED_SIGNING_KEY: ${{ secrets.NIK_FEED_SIGNING_KEY }}
           NIK_LOCAL_FEED_ROOT: ${{ vars.NIK_LOCAL_FEED_ROOT }}
+          NIK_LOCAL_FEED_STATE_ROOT: ${{ vars.NIK_LOCAL_FEED_STATE_ROOT }}
           SDK_REFERENCE: ${{ steps.sdk.outputs.sdk_reference }}
         shell: bash
         run: |
           set -euo pipefail
           [[ -n "$NIK_FEED_SIGNING_KEY" ]] || { echo 'NIK_FEED_SIGNING_KEY is not configured for nik-feed' >&2; exit 1; }
-          key_dir="$HOME/.config/nik-feed"
+          state_root="${NIK_LOCAL_FEED_STATE_ROOT:-/mnt/d/nik-feed-state}"
+          key_dir="$state_root/keys"
           key_file="$key_dir/nik-feed.key"
           candidate="$key_dir/.nik-feed.key.$GITHUB_RUN_ID"
           mkdir -p "$key_dir"
@@ -81,9 +83,10 @@ jobs:
           trap 'rm -rf "$verify_dir"' EXIT
           rm -rf "$verify_dir"
 
-          feed_root="${NIK_LOCAL_FEED_ROOT:-$HOME/nik-owrt-feed}"
+          feed_root="${NIK_LOCAL_FEED_ROOT:-/mnt/d/nik-feed}"
           mkdir -p "$feed_root/served" "$feed_root/releases"
-          chmod 700 "$key_dir"
+          mkdir -p "$state_root/locks" "$state_root/metadata"
+          chmod 700 "$key_dir" "$state_root/locks" "$state_root/metadata"
           printf 'Local feed signing key installed: %s\nLocal feed root: %s\n' "$key_file" "$feed_root"
 
       - name: Ensure LAN HTTP server

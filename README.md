@@ -22,20 +22,24 @@ The public GitHub Pages deployment is only a package-free tombstone. It must nev
 
 ## Local storage
 
-Default persistent root on the self-hosted Linux runner:
+Default persistent roots on the self-hosted WSL runner:
 
 ```text
-$HOME/nik-owrt-feed/
-├── .publish.lock
+/mnt/d/nik-feed/
 ├── releases/
 │   └── dev/24.10.4/aarch64_cortex-a53/<immutable-release>/
 └── served/
     └── dev/24.10.4/aarch64_cortex-a53 -> <immutable-release>
+
+/mnt/d/nik-feed-state/
+├── keys/nik-feed.key
+├── locks/publish.lock
+└── metadata/
 ```
 
 `served/` is the only tree the LAN HTTP server exposes. The live architecture directory is an atomic symlink to an immutable release snapshot, so `opkg` cannot observe a half-updated package index.
 
-Override the root with repository/organization Actions variable `NIK_LOCAL_FEED_ROOT` when required.
+Override these roots with `NIK_LOCAL_FEED_ROOT` and `NIK_LOCAL_FEED_STATE_ROOT` when required.
 
 ## Publication contract
 
@@ -51,22 +55,21 @@ Each package workflow passes its validated `.artifacts/packages` directory and t
 
 1. requires exactly one `<package>_*.ipk` plus `package-build.json`;
 2. verifies package name, immutable SDK reference, platform build ID, filename and SHA-256;
-3. derives the userspace compatibility ID from the immutable SDK platform manifest;
-4. takes a host-wide `flock` so package workflows from different GitHub repositories cannot race;
+3. preserves the package's existing OPKG version without generating or changing it;
+4. takes a host-wide `flock` from `/mnt/d/nik-feed-state/locks` so package workflows from different GitHub repositories cannot race;
 5. copies the previous live snapshot into a staging release;
 6. removes the previous version of only the package being replaced;
-7. invalidates ABI-sensitive packages if the userspace compatibility generation changed;
-8. regenerates `Packages.manifest`, `Packages`, `Packages.gz` with OpenWrt tools from the immutable SDK;
-9. signs and immediately verifies `Packages.sig` with `usign`;
-10. generates `feed.json` with provenance and missing-package state;
-11. atomically switches the live symlink to the complete immutable release;
-12. keeps the live snapshot plus two non-served rollback snapshots.
+7. regenerates `Packages.manifest`, `Packages`, `Packages.gz` with OpenWrt tools from the immutable SDK;
+8. signs and immediately verifies `Packages.sig` with `usign`;
+9. generates `feed.json` with provenance and missing-package state;
+10. atomically switches the live symlink to the complete immutable release;
+11. keeps the live snapshot plus two non-served rollback snapshots.
 
 The served feed therefore contains at most one current version of every package.
 
 ## Compatibility
 
-`config/compatibility.json` defines the policy. The default is `architecture-all`; currently `br-core` uses `userspace-abi-v1` and is invalidated automatically when the SDK userspace ABI identity changes.
+The publisher verifies that `package-build.json` names the same immutable SDK and platform build ID exposed by the SDK image. It records that provenance per package but does not generate versions or rewrite package metadata.
 
 The active package set is `config/packages.txt` and currently contains 23 packages.
 
@@ -83,7 +86,7 @@ The private key is never committed and is never served over HTTP.
 One-time bootstrap copies the existing `NIK_FEED_SIGNING_KEY` repository secret onto the trusted self-hosted runner only after a sign+verify check against `keys/nik-feed.pub`:
 
 ```text
-$HOME/.config/nik-feed/nik-feed.key
+/mnt/d/nik-feed-state/keys/nik-feed.key
 ```
 
 Override that path with `NIK_FEED_SIGNING_KEY_FILE` if required. Package repositories do not need to own the signing secret once the local runner has been bootstrapped.

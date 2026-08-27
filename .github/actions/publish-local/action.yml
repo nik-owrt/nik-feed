@@ -1,5 +1,5 @@
 name: Publish package to local NIK feed
-description: Publishes one validated OpenWrt IPK into the LAN-only unsigned OPKG feed on the self-hosted Windows/WSL runner.
+description: Publishes one validated OpenWrt IPK into the LAN-only signed OPKG feed on the self-hosted Windows/WSL runner.
 inputs:
   package:
     description: OpenWrt package name, for example br-core or fr-wifi.
@@ -15,8 +15,12 @@ inputs:
     description: Persistent Windows feed root as seen from WSL. Empty uses NIK_LOCAL_FEED_ROOT or /mnt/d/nik-feed.
     required: false
     default: ""
+  state_root:
+    description: Persistent private publisher state root containing keys and locks.
+    required: false
+    default: /mnt/d/nik-feed-state
   signing_key_file:
-    description: Deprecated compatibility input. The LAN development feed is intentionally unsigned.
+    description: Optional private usign key path. Empty uses state_root/keys/nik-feed.key.
     required: false
     default: ""
   channel:
@@ -45,6 +49,8 @@ runs:
         NIK_PUBLISH_SOURCE_DIR: ${{ inputs.source_dir }}
         NIK_PUBLISH_SDK_REFERENCE: ${{ inputs.sdk_reference }}
         NIK_PUBLISH_FEED_ROOT: ${{ inputs.feed_root }}
+        NIK_PUBLISH_STATE_ROOT: ${{ inputs.state_root }}
+        NIK_PUBLISH_SIGNING_KEY_FILE: ${{ inputs.signing_key_file }}
         NIK_PUBLISH_CHANNEL: ${{ inputs.channel }}
         NIK_PUBLISH_OPENWRT_VERSION: ${{ inputs.openwrt_version }}
         NIK_PUBLISH_PACKAGE_ARCH: ${{ inputs.package_arch }}

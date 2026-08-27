@@ -3,6 +3,8 @@ name: Retire public package feed
 on:
   push:
     branches: [main]
+    paths:
+      - .github/workflows/publish.yml
   workflow_dispatch:
 
 permissions:

@@ -91,6 +91,8 @@ One-time bootstrap copies the existing `NIK_FEED_SIGNING_KEY` repository secret 
 
 Override that path with `NIK_FEED_SIGNING_KEY_FILE` if required. Package repositories do not need to own the signing secret once the local runner has been bootstrapped.
 
+During migration, the publisher copies an already-installed legacy key from `$HOME/.config/nik-feed/nik-feed.key` into the canonical state directory when the canonical file is absent. It never generates a replacement key and fails closed when neither file exists.
+
 ## LAN HTTP server
 
 The helper below keeps an nginx container running locally and exposes only the `served/` tree:

@@ -12,7 +12,8 @@ state_root="$tmp/state"
 source_dir="$tmp/source"
 fake_bin="$tmp/bin"
 mkdir -p "$feed_root" "$state_root/keys" "$source_dir" "$fake_bin"
-printf 'private test key\n' > "$state_root/keys/nik-feed.key"
+legacy_key="$tmp/legacy-feed.key"
+printf 'private test key\n' > "$legacy_key"
 
 cat > "$fake_bin/docker" <<'SH'
 #!/usr/bin/env bash
@@ -78,6 +79,7 @@ publish() {
   NIK_PUBLISH_FEED_ROOT="$feed_root" \
   NIK_PUBLISH_STATE_ROOT="$state_root" \
   NIK_PUBLISH_SIGNING_KEY_FILE="$state_root/keys/nik-feed.key" \
+  NIK_PUBLISH_LEGACY_SIGNING_KEY_FILE="$legacy_key" \
   NIK_PUBLISH_CHANNEL=dev \
   NIK_PUBLISH_OPENWRT_VERSION=24.10.4 \
   NIK_PUBLISH_PACKAGE_ARCH=aarch64_cortex-a53 \
@@ -88,6 +90,7 @@ live="$feed_root/served/dev/24.10.4/aarch64_cortex-a53"
 
 make_package 1.0.0-1 first
 publish
+cmp -s "$legacy_key" "$state_root/keys/nik-feed.key"
 [[ -L "$live" ]]
 [[ -s "$live/Packages.sig" ]]
 [[ -s "$live/nik-feed.pub" ]]

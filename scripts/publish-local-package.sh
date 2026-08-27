@@ -11,6 +11,7 @@ feed_arch="${NIK_PUBLISH_PACKAGE_ARCH:-aarch64_cortex-a53}"
 feed_root="${NIK_PUBLISH_FEED_ROOT:-${NIK_LOCAL_FEED_ROOT:-/mnt/d/nik-feed}}"
 state_root="${NIK_PUBLISH_STATE_ROOT:-${NIK_LOCAL_FEED_STATE_ROOT:-/mnt/d/nik-feed-state}}"
 signing_key_file="${NIK_PUBLISH_SIGNING_KEY_FILE:-${NIK_FEED_SIGNING_KEY_FILE:-$state_root/keys/nik-feed.key}}"
+legacy_signing_key_file="${NIK_PUBLISH_LEGACY_SIGNING_KEY_FILE:-$HOME/.config/nik-feed/nik-feed.key}"
 public_key_file="$repo_root/keys/nik-feed.pub"
 packages_file="$repo_root/config/packages.txt"
 lock_file="${NIK_PUBLISH_LOCK_FILE:-$state_root/locks/publish.lock}"
@@ -25,11 +26,17 @@ fail() {
 [[ -d "$source_dir" ]] || fail "package directory does not exist: $source_dir"
 [[ -s "$packages_file" ]] || fail "missing package contract: $packages_file"
 [[ -s "$public_key_file" ]] || fail "missing feed public key: $public_key_file"
-[[ -s "$signing_key_file" ]] || fail "missing feed signing key: $signing_key_file"
 
-for cmd in docker flock python3; do
+for cmd in docker flock install python3; do
   command -v "$cmd" >/dev/null || fail "required command is missing: $cmd"
 done
+
+if [[ ! -s "$signing_key_file" ]]; then
+  [[ -s "$legacy_signing_key_file" ]] || fail "missing feed signing key: $signing_key_file"
+  mkdir -p "$(dirname "$signing_key_file")" || fail "cannot create signing key directory"
+  umask 077
+  install -m 0600 "$legacy_signing_key_file" "$signing_key_file"
+fi
 
 mapfile -t ipks < <(find "$source_dir" -maxdepth 1 -type f -name "${package}_*.ipk" -print | LC_ALL=C sort)
 [[ "${#ipks[@]}" -eq 1 ]] || fail "expected exactly one ${package} IPK in ${source_dir}, found ${#ipks[@]}"

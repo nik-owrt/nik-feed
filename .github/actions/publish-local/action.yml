@@ -1,5 +1,5 @@
 name: Publish package to local NIK feed
-description: Atomically publishes one validated OpenWrt package into the self-hosted local OPKG feed.
+description: Publishes one validated OpenWrt IPK into the LAN-only unsigned OPKG feed on the self-hosted Windows/WSL runner.
 inputs:
   package:
     description: OpenWrt package name, for example br-core or fr-wifi.
@@ -9,14 +9,14 @@ inputs:
     required: false
     default: .artifacts/packages
   sdk_reference:
-    description: Immutable OpenWrt SDK image reference used to build and sign the feed.
+    description: Immutable OpenWrt SDK image reference used to generate the native OPKG index.
     required: true
   feed_root:
-    description: Persistent local feed root on the self-hosted runner. Empty uses NIK_LOCAL_FEED_ROOT or $HOME/nik-owrt-feed.
+    description: Persistent Windows feed root as seen from WSL. Empty uses NIK_LOCAL_FEED_ROOT or /mnt/d/nik-feed.
     required: false
     default: ""
   signing_key_file:
-    description: Existing local feed signing key path. Empty uses NIK_FEED_SIGNING_KEY_FILE or $HOME/.config/nik-feed/nik-feed.key.
+    description: Deprecated compatibility input. The LAN development feed is intentionally unsigned.
     required: false
     default: ""
   channel:
@@ -30,10 +30,10 @@ inputs:
     default: aarch64_cortex-a53
 outputs:
   feed_path:
-    description: Local live feed directory/symlink.
+    description: Local live feed directory.
     value: ${{ steps.publish.outputs.feed_path }}
   feed_leaf:
-    description: Relative OPKG feed leaf below the served root.
+    description: Relative OPKG feed leaf below the Windows HTTP root.
     value: ${{ steps.publish.outputs.feed_leaf }}
 runs:
   using: composite
@@ -45,7 +45,6 @@ runs:
         NIK_PUBLISH_SOURCE_DIR: ${{ inputs.source_dir }}
         NIK_PUBLISH_SDK_REFERENCE: ${{ inputs.sdk_reference }}
         NIK_PUBLISH_FEED_ROOT: ${{ inputs.feed_root }}
-        NIK_PUBLISH_SIGNING_KEY_FILE: ${{ inputs.signing_key_file }}
         NIK_PUBLISH_CHANNEL: ${{ inputs.channel }}
         NIK_PUBLISH_OPENWRT_VERSION: ${{ inputs.openwrt_version }}
         NIK_PUBLISH_PACKAGE_ARCH: ${{ inputs.package_arch }}

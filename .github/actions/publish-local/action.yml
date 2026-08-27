@@ -1,0 +1,52 @@
+name: Publish package to local NIK feed
+description: Atomically publishes one validated OpenWrt package into the self-hosted local OPKG feed.
+inputs:
+  package:
+    description: OpenWrt package name, for example br-core or fr-wifi.
+    required: true
+  source_dir:
+    description: Directory containing exactly one package IPK and package-build.json.
+    required: false
+    default: .artifacts/packages
+  sdk_reference:
+    description: Immutable OpenWrt SDK image reference used to build and sign the feed.
+    required: true
+  feed_root:
+    description: Persistent local feed root on the self-hosted runner. Empty uses NIK_LOCAL_FEED_ROOT or $HOME/nik-owrt-feed.
+    required: false
+    default: ""
+  signing_key_file:
+    description: Existing local feed signing key path. Empty uses NIK_FEED_SIGNING_KEY_FILE or $HOME/.config/nik-feed/nik-feed.key.
+    required: false
+    default: ""
+  channel:
+    required: false
+    default: dev
+  openwrt_version:
+    required: false
+    default: "24.10.4"
+  package_arch:
+    required: false
+    default: aarch64_cortex-a53
+outputs:
+  feed_path:
+    description: Local live feed directory/symlink.
+    value: ${{ steps.publish.outputs.feed_path }}
+  feed_leaf:
+    description: Relative OPKG feed leaf below the served root.
+    value: ${{ steps.publish.outputs.feed_leaf }}
+runs:
+  using: composite
+  steps:
+    - id: publish
+      shell: bash
+      env:
+        NIK_PUBLISH_PACKAGE: ${{ inputs.package }}
+        NIK_PUBLISH_SOURCE_DIR: ${{ inputs.source_dir }}
+        NIK_PUBLISH_SDK_REFERENCE: ${{ inputs.sdk_reference }}
+        NIK_PUBLISH_FEED_ROOT: ${{ inputs.feed_root }}
+        NIK_PUBLISH_SIGNING_KEY_FILE: ${{ inputs.signing_key_file }}
+        NIK_PUBLISH_CHANNEL: ${{ inputs.channel }}
+        NIK_PUBLISH_OPENWRT_VERSION: ${{ inputs.openwrt_version }}
+        NIK_PUBLISH_PACKAGE_ARCH: ${{ inputs.package_arch }}
+      run: bash "$GITHUB_ACTION_PATH/../../../scripts/publish-local-package.sh"

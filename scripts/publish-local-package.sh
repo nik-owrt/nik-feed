@@ -78,44 +78,103 @@ sdk_pbid="$(docker image inspect --format '{{ index .Config.Labels "org.nik-link
 [[ "$sdk_pbid" == "$meta_pbid" ]] || fail "SDK/platform build id mismatch"
 
 # The Windows D: feed and its private state are persistent WSL mounts.
-mkdir -p "$feed_root" "$state_root/locks" || fail "cannot create feed/state directories"
+mkdir -p "$feed_root" "$state_root/locks" "$state_root/transactions" || fail "cannot create feed/state directories"
 probe="$feed_root/.nik-feed-write-probe.$$"
 : > "$probe" || fail "feed root is not writable: $feed_root"
 rm -f "$probe"
 
+# All package repositories share this publisher. Serialize the entire replacement
+# and reindex operation so concurrent GitHub Actions runs cannot corrupt the feed.
 exec 9>"$lock_file"
 flock 9
 
 leaf_rel="$channel/$openwrt_version/$feed_arch"
-release_parent="$feed_root/releases/$leaf_rel"
 served_parent="$feed_root/served/$channel/$openwrt_version"
 live="$served_parent/$feed_arch"
 legacy_live="$feed_root/$leaf_rel"
-mkdir -p "$release_parent" "$served_parent"
-[[ ! -e "$live" || -L "$live" ]] || fail "live feed path is not a symlink: $live"
+release_parent="$feed_root/releases/$leaf_rel"
+mkdir -p "$served_parent"
 
-work="$(mktemp -d "$release_parent/.staging-${package}.XXXXXX")"
-next_link=""
-cleanup() {
-  [[ -z "$next_link" ]] || rm -f "$next_link" 2>/dev/null || true
-  [[ -z "$work" ]] || rm -rf "$work" 2>/dev/null || true
-}
-trap cleanup EXIT
-
-# Candidate snapshot = current live packages with exactly this package replaced.
+# One-time migration from the old immutable-snapshot/symlink layout. Build a real
+# directory first, then replace the symlink. Old release snapshots are removed
+# only after a successful publication below.
 if [[ -L "$live" ]]; then
   current_target="$(readlink -f "$live")"
   [[ -d "$current_target" ]] || fail "live feed symlink is broken: $live"
-  cp -a "$current_target/." "$work/"
-elif [[ -d "$legacy_live" ]]; then
-  cp -a "$legacy_live/." "$work/"
+  migration="$(mktemp -d "$served_parent/.migrate-${feed_arch}.XXXXXX")"
+  cp -a "$current_target/." "$migration/"
+  rm -f "$live"
+  mv "$migration" "$live"
+elif [[ ! -e "$live" ]]; then
+  mkdir -p "$live"
+  if [[ -d "$legacy_live" ]]; then
+    cp -a "$legacy_live/." "$live/"
+  fi
+elif [[ ! -d "$live" ]]; then
+  fail "live feed path is not a directory: $live"
 fi
-mkdir -p "$work/.meta"
-find "$work" -maxdepth 1 -type f -name "${package}_*.ipk" -delete
-rm -f "$work/.meta/${package}.json"
-cp -f "$ipk" "$work/$(basename "$ipk")"
+mkdir -p "$live/.meta"
 
-python3 - "$work/.meta/${package}.json" "$package" "$sdk_reference" "$meta_pbid" "$actual_sha" "$(basename "$ipk")" <<'PY'
+next_manifest="$live/.next.Packages.manifest"
+next_packages="$live/.next.Packages"
+next_gzip="$live/.next.Packages.gz"
+next_sig="$live/.next.Packages.sig"
+next_feed="$live/.next.feed.json"
+incoming="$live/.incoming-$(basename "$ipk").$$"
+txn="$(mktemp -d "$state_root/transactions/${package}.XXXXXX")"
+committed=0
+
+rollback() {
+  local rc=$?
+  rm -f "$incoming" "$next_manifest" "$next_packages" "$next_gzip" "$next_sig" "$next_feed" 2>/dev/null || true
+  if (( committed == 0 )); then
+    find "$live" -maxdepth 1 -type f -name "${package}_*.ipk" -delete 2>/dev/null || true
+    if [[ -d "$txn/ipks" ]]; then
+      cp -a "$txn/ipks/." "$live/" 2>/dev/null || true
+    fi
+    if [[ -f "$txn/meta.json" ]]; then
+      cp -f "$txn/meta.json" "$live/.meta/${package}.json" 2>/dev/null || true
+    else
+      rm -f "$live/.meta/${package}.json" 2>/dev/null || true
+    fi
+    if [[ -d "$txn/index" ]]; then
+      for name in Packages.manifest Packages Packages.gz Packages.sig feed.json nik-feed.pub; do
+        if [[ -f "$txn/index/$name" ]]; then
+          cp -f "$txn/index/$name" "$live/$name" 2>/dev/null || true
+        else
+          rm -f "$live/$name" 2>/dev/null || true
+        fi
+      done
+    fi
+  fi
+  rm -rf "$txn" 2>/dev/null || true
+  exit "$rc"
+}
+trap rollback EXIT
+
+# Back up only the package being replaced, its provenance, and the small index
+# files. We never duplicate the complete feed for routine package updates.
+mkdir -p "$txn/ipks" "$txn/index"
+mapfile -t old_ipks < <(find "$live" -maxdepth 1 -type f -name "${package}_*.ipk" -print | LC_ALL=C sort)
+for old in "${old_ipks[@]}"; do
+  cp -a "$old" "$txn/ipks/"
+done
+[[ ! -f "$live/.meta/${package}.json" ]] || cp -f "$live/.meta/${package}.json" "$txn/meta.json"
+for name in Packages.manifest Packages Packages.gz Packages.sig feed.json nik-feed.pub; do
+  [[ ! -f "$live/$name" ]] || cp -f "$live/$name" "$txn/index/$name"
+done
+
+# Replace exactly one package in the live feed. Copy to a hidden temporary name
+# first so readers can never observe a partial IPK.
+cp -f "$ipk" "$incoming"
+destination="$live/$(basename "$ipk")"
+mv -f "$incoming" "$destination"
+for old in "${old_ipks[@]}"; do
+  [[ "$old" == "$destination" ]] || rm -f "$old"
+done
+
+meta_next="$live/.meta/.${package}.json.next.$$"
+python3 - "$meta_next" "$package" "$sdk_reference" "$meta_pbid" "$actual_sha" "$(basename "$ipk")" <<'PY'
 import json, os, sys
 from pathlib import Path
 
@@ -133,11 +192,13 @@ path.write_text(json.dumps({
     'sha256': sha256,
 }, indent=2) + '\n')
 PY
+mv -f "$meta_next" "$live/.meta/${package}.json"
 
-# The immutable SDK owns ipkg-make-index and mkhash. Host WSL does not need
-# usign, jq, gzip, or an OpenWrt build tree.
+# Generate and verify the next index set under hidden names. The currently
+# served index files remain untouched until every new file is complete.
+rm -f "$next_manifest" "$next_packages" "$next_gzip" "$next_sig" "$next_feed"
 docker run --rm \
-  --mount "type=bind,src=$work,dst=/feed" \
+  --mount "type=bind,src=$live,dst=/feed" \
   --mount "type=bind,src=$signing_key_file,dst=/run/nik-feed.sec,readonly" \
   --mount "type=bind,src=$public_key_file,dst=/run/nik-feed.pub,readonly" \
   "$sdk_reference" bash -lc '
@@ -148,21 +209,23 @@ docker run --rm \
     [[ -x "$mkhash" ]] || { echo "SDK mkhash not found" >&2; exit 1; }
     [[ -x "$usign" ]] || { echo "SDK usign not found" >&2; exit 1; }
     [[ -x /opt/openwrt-sdk/scripts/ipkg-make-index.sh ]] || { echo "SDK ipkg-make-index.sh not found" >&2; exit 1; }
-    MKHASH="$mkhash" /opt/openwrt-sdk/scripts/ipkg-make-index.sh . > Packages.manifest
-    grep -vE "^(Maintainer|LicenseFiles|Source|SourceName|Require|SourceDateEpoch)" Packages.manifest > Packages
-    gzip -9nc Packages > Packages.gz
-    "$usign" -S -m Packages -s /run/nik-feed.sec -x Packages.sig
-    "$usign" -V -m Packages -p /run/nik-feed.pub -x Packages.sig
+    MKHASH="$mkhash" /opt/openwrt-sdk/scripts/ipkg-make-index.sh . > .next.Packages.manifest
+    grep -vE "^(Maintainer|LicenseFiles|Source|SourceName|Require|SourceDateEpoch)" .next.Packages.manifest > .next.Packages
+    gzip -9nc .next.Packages > .next.Packages.gz
+    "$usign" -S -m .next.Packages -s /run/nik-feed.sec -x .next.Packages.sig
+    "$usign" -V -m .next.Packages -p /run/nik-feed.pub -x .next.Packages.sig
   '
 
-python3 - "$work" "$packages_file" "$channel" "$openwrt_version" "$feed_arch" "$meta_pbid" "$sdk_reference" <<'PY'
+python3 - "$live" "$next_packages" "$next_feed" "$packages_file" "$channel" "$openwrt_version" "$feed_arch" "$meta_pbid" "$sdk_reference" <<'PY'
 import hashlib, json, sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 leaf = Path(sys.argv[1])
-packages_file = Path(sys.argv[2])
-channel, openwrt, arch, pbid, sdk = sys.argv[3:]
+packages_path = Path(sys.argv[2])
+output_path = Path(sys.argv[3])
+packages_file = Path(sys.argv[4])
+channel, openwrt, arch, pbid, sdk = sys.argv[5:]
 expected = []
 for raw in packages_file.read_text().splitlines():
     name = raw.split('#', 1)[0].strip()
@@ -170,7 +233,7 @@ for raw in packages_file.read_text().splitlines():
         expected.append(name)
 
 items = []
-text = (leaf / 'Packages').read_text()
+text = packages_path.read_text()
 for stanza in text.strip().split('\n\n') if text.strip() else []:
     fields = {}
     current = None
@@ -223,41 +286,41 @@ feed = {
     'missing_packages': missing,
     'packages': items,
 }
-(leaf / 'feed.json').write_text(json.dumps(feed, indent=2) + '\n')
+output_path.write_text(json.dumps(feed, indent=2) + '\n')
 PY
 
-[[ -s "$work/Packages" && -s "$work/Packages.gz" && -s "$work/Packages.sig" ]] || fail "signed feed index is incomplete"
-cp -f "$public_key_file" "$work/nik-feed.pub"
+[[ -s "$next_manifest" && -s "$next_packages" && -s "$next_gzip" && -s "$next_sig" && -s "$next_feed" ]] || fail "signed feed index is incomplete"
 
-release_id="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-${package}-$$"
-final_release="$release_parent/$release_id"
-mv "$work" "$final_release"
-work=""
+# Each rename is atomic. The old index set stays available until generation and
+# signature verification have succeeded; the transaction backup allows rollback
+# if any final rename unexpectedly fails.
+mv -f "$next_manifest" "$live/Packages.manifest"
+mv -f "$next_packages" "$live/Packages"
+mv -f "$next_gzip" "$live/Packages.gz"
+mv -f "$next_sig" "$live/Packages.sig"
+mv -f "$next_feed" "$live/feed.json"
+install -m 0644 "$public_key_file" "$live/nik-feed.pub"
 
-relative_target="$(python3 - "$served_parent" "$final_release" <<'PY'
-import os, sys
-print(os.path.relpath(sys.argv[2], sys.argv[1]))
-PY
-)"
-next_link="$served_parent/.${feed_arch}.next-$$"
-ln -s "$relative_target" "$next_link"
-mv -Tf "$next_link" "$live"
-next_link=""
+committed=1
 
-# Keep the live snapshot and two rollback snapshots. Version values are never
-# generated or modified here; the ready-built IPK remains the source of truth.
-mapfile -t releases < <(find "$release_parent" -mindepth 1 -maxdepth 1 -type d ! -name '.staging-*' -printf '%T@ %p\n' | LC_ALL=C sort -nr | cut -d' ' -f2-)
-if (( ${#releases[@]} > 3 )); then
-  for old in "${releases[@]:3}"; do rm -rf "$old"; done
+# Remove storage from the retired snapshot architecture after the live directory
+# is proven valid. Routine publications never create release directories again.
+rm -rf "$release_parent"
+if [[ "$legacy_live" != "$live" && -d "$legacy_live" ]]; then
+  rm -rf "$legacy_live"
+fi
+if [[ -d "$feed_root/releases" ]]; then
+  find "$feed_root/releases" -depth -type d -empty -delete 2>/dev/null || true
 fi
 
-read -r available expected < <(python3 - "$final_release/feed.json" <<'PY'
+read -r available expected < <(python3 - "$live/feed.json" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1]))
 print(m['available_packages'], m['expected_packages'])
 PY
 )
-printf 'local feed published: %s -> %s (%s/%s packages)\n' "$live" "$relative_target" "$available" "$expected"
-if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-  printf 'feed_path=%s\nfeed_leaf=%s\n' "$live" "$leaf_rel" >> "$GITHUB_OUTPUT"
-fi
+printf 'local feed published in-place: %s (%s/%s packages)\n' "$live" "$available" "$expected"
+printf 'feed_path=%s\nfeed_leaf=%s\n' "$live" "$leaf_rel" >> "${GITHUB_OUTPUT:-/dev/null}"
+
+rm -rf "$txn"
+trap - EXIT

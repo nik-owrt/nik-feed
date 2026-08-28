@@ -37,7 +37,7 @@ case "${1:-}" in
       esac
     done
     [[ -d "$feed" && -s "$key" && -s "$public_key" ]]
-    : > "$feed/Packages.manifest"
+    : > "$feed/.next.Packages.manifest"
     for ipk in "$feed"/*.ipk; do
       [[ -e "$ipk" ]] || continue
       base="$(basename "$ipk")"
@@ -45,11 +45,11 @@ case "${1:-}" in
       size="$(wc -c < "$ipk" | tr -d ' ')"
       sha="$(sha256sum "$ipk" | awk '{print $1}')"
       printf 'Package: %s\nVersion: %s\nArchitecture: %s\nFilename: ./%s\nSize: %s\nSHA256sum: %s\n\n' \
-        "$package" "$version" "$architecture" "$base" "$size" "$sha" >> "$feed/Packages.manifest"
+        "$package" "$version" "$architecture" "$base" "$size" "$sha" >> "$feed/.next.Packages.manifest"
     done
-    cp "$feed/Packages.manifest" "$feed/Packages"
-    gzip -9nc "$feed/Packages" > "$feed/Packages.gz"
-    printf 'fake verified signature\n' > "$feed/Packages.sig"
+    cp "$feed/.next.Packages.manifest" "$feed/.next.Packages"
+    gzip -9nc "$feed/.next.Packages" > "$feed/.next.Packages.gz"
+    printf 'fake verified signature\n' > "$feed/.next.Packages.sig"
     ;;
   *)
     printf 'unexpected docker invocation: %s\n' "$*" >&2
@@ -87,33 +87,36 @@ publish() {
 }
 
 live="$feed_root/served/dev/24.10.4/aarch64_cortex-a53"
+legacy_release="$feed_root/releases/dev/24.10.4/aarch64_cortex-a53/legacy"
+mkdir -p "$(dirname "$live")" "$legacy_release/.meta"
+ln -s "$legacy_release" "$live"
 
 make_package 1.0.0-1 first
 publish
 cmp -s "$legacy_key" "$state_root/keys/nik-feed.key"
-[[ -L "$live" ]]
+[[ -d "$live" && ! -L "$live" ]]
 [[ -s "$live/Packages.sig" ]]
 [[ -s "$live/nik-feed.pub" ]]
 [[ -f "$live/br-core_1.0.0-1_aarch64_cortex-a53.ipk" ]]
-first_target="$(readlink -f "$live")"
+[[ ! -e "$feed_root/releases" ]]
+live_inode="$(stat -c '%d:%i' "$live")"
 
 make_package 1.1.0-1 second
 publish
-second_target="$(readlink -f "$live")"
-[[ "$first_target" != "$second_target" ]]
-[[ -d "$first_target" ]]
+[[ "$(stat -c '%d:%i' "$live")" == "$live_inode" ]]
 [[ -f "$live/br-core_1.1.0-1_aarch64_cortex-a53.ipk" ]]
 [[ ! -e "$live/br-core_1.0.0-1_aarch64_cortex-a53.ipk" ]]
-[[ "$(find -L "$live" -maxdepth 1 -type f -name 'br-core_*.ipk' | wc -l)" -eq 1 ]]
+[[ "$(find "$live" -maxdepth 1 -type f -name 'br-core_*.ipk' | wc -l)" -eq 1 ]]
 
+cp "$live/Packages" "$tmp/packages-before-failure"
 make_package 1.2.0-1 third
 if NIK_TEST_DOCKER_FAIL=1 publish; then
   echo 'publisher unexpectedly succeeded after index/sign failure' >&2
   exit 1
 fi
-[[ "$(readlink -f "$live")" == "$second_target" ]]
 [[ -f "$live/br-core_1.1.0-1_aarch64_cortex-a53.ipk" ]]
 [[ ! -e "$live/br-core_1.2.0-1_aarch64_cortex-a53.ipk" ]]
+cmp -s "$tmp/packages-before-failure" "$live/Packages"
 
 python3 - "$live/feed.json" <<'PY'
 import json, sys

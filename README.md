@@ -13,7 +13,8 @@ package repository
   -> build one IPK
   -> validate final IPK/payload
   -> local nik-feed publisher
-  -> signed local OPKG index
+  -> replace one package in the live feed
+  -> regenerate and sign the local OPKG index
   -> LAN HTTP server
   -> OpenWrt opkg
 ```
@@ -26,18 +27,27 @@ Default persistent roots on the self-hosted WSL runner:
 
 ```text
 /mnt/d/nik-feed/
-├── releases/
-│   └── dev/24.10.4/aarch64_cortex-a53/<immutable-release>/
 └── served/
-    └── dev/24.10.4/aarch64_cortex-a53 -> <immutable-release>
+    └── dev/24.10.4/aarch64_cortex-a53/
+        ├── br-*.ipk
+        ├── fr-*.ipk
+        ├── .meta/
+        ├── Packages.manifest
+        ├── Packages
+        ├── Packages.gz
+        ├── Packages.sig
+        ├── feed.json
+        └── nik-feed.pub
 
 /mnt/d/nik-feed-state/
 ├── keys/nik-feed.key
 ├── locks/publish.lock
-└── metadata/
+└── transactions/
 ```
 
-`served/` is the only tree the LAN HTTP server exposes. The live architecture directory is an atomic symlink to an immutable release snapshot, so `opkg` cannot observe a half-updated package index.
+`served/` is the only tree the LAN HTTP server exposes. The architecture directory is a real persistent directory, not a per-deployment symlink. Every successful package deployment replaces only that package and then regenerates the feed indexes in place.
+
+The retired `releases/<timestamp-run-package-pid>/` snapshot layout is migrated automatically on the next successful publication and removed after the new live feed has been validated.
 
 Override these roots with `NIK_LOCAL_FEED_ROOT` and `NIK_LOCAL_FEED_STATE_ROOT` when required.
 
@@ -57,15 +67,17 @@ Each package workflow passes its validated `.artifacts/packages` directory and t
 2. verifies package name, immutable SDK reference, platform build ID, filename and SHA-256;
 3. preserves the package's existing OPKG version without generating or changing it;
 4. takes a host-wide `flock` from `/mnt/d/nik-feed-state/locks` so package workflows from different GitHub repositories cannot race;
-5. copies the previous live snapshot into a staging release;
-6. removes the previous version of only the package being replaced;
-7. regenerates `Packages.manifest`, `Packages`, `Packages.gz` with OpenWrt tools from the immutable SDK;
-8. signs and immediately verifies `Packages.sig` with `usign`;
-9. generates `feed.json` with provenance and missing-package state;
-10. atomically switches the live symlink to the complete immutable release;
-11. keeps the live snapshot plus two non-served rollback snapshots.
+5. migrates the old release-snapshot symlink layout to a real live directory when encountered;
+6. backs up only the package being replaced, its provenance metadata, and the small current index files;
+7. atomically copies the new IPK into the live directory and removes only older IPKs for that same package;
+8. regenerates `Packages.manifest`, `Packages`, `Packages.gz` under hidden temporary names with OpenWrt tools from the immutable SDK;
+9. signs and immediately verifies the next `Packages.sig` with `usign`;
+10. generates the next `feed.json` with provenance and missing-package state;
+11. atomically renames the completed index files into their live names;
+12. rolls the package and index files back if generation/signing fails;
+13. removes the retired release snapshot tree after a successful migration.
 
-The served feed therefore contains at most one current version of every package.
+Routine package publication never duplicates the complete feed and never creates a new release directory. The served feed contains at most one current version of every package.
 
 ## Compatibility
 

@@ -1,7 +1,15 @@
 # Active NIK OpenWrt package repositories.
 # One repository/package name per line. Empty lines and # comments are ignored.
+#
+# During the unified-package migration the legacy br-*/fr-* packages stay in
+# the feed as an explicit rollback path. Remove them only after router cutover
+# and rollback validation are complete.
 
-# Backend
+# Unified runtime/UI
+nikd
+nik-ui
+
+# Legacy backend (migration rollback)
 br-core
 br-cellular
 br-clients
@@ -14,7 +22,7 @@ br-system
 br-wifi
 br-zerotier
 
-# Frontend
+# Legacy frontend (migration rollback)
 fr-shared
 fr-core
 fr-cellular

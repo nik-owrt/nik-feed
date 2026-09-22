@@ -1,0 +1,68 @@
+name: Test local publisher
+
+on:
+  push:
+    branches: [main, migration/unified-packages]
+    paths:
+      - .github/actions/publish-local/action.yml
+      - .github/workflows/test-local-publisher.yml
+      - config/packages.txt
+      - scripts/publish-local-package.sh
+      - tests/**
+  pull_request:
+    paths:
+      - .github/actions/publish-local/action.yml
+      - .github/workflows/test-local-publisher.yml
+      - config/packages.txt
+      - scripts/publish-local-package.sh
+      - tests/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nik-feed-test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publisher:
+    runs-on: [self-hosted, Linux, X64, nik-heavy]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Validate unified package contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/publish-local-package.sh
+          grep -qx 'nikd' config/packages.txt
+          grep -qx 'nik-ui' config/packages.txt
+          grep -Fq 'nikd|nik-ui|' scripts/publish-local-package.sh
+
+      - name: Test legacy publisher transaction path
+        shell: bash
+        run: bash tests/test-publish-local-package.sh
+
+      - name: Test nikd publisher transaction path
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_file="tests/.test-publish-nikd.$$"
+          trap 'rm -f "$test_file"' EXIT
+          sed 's/br-core/nikd/g' tests/test-publish-local-package.sh > "$test_file"
+          chmod +x "$test_file"
+          bash "$test_file"
+
+      - name: Test nik-ui publisher transaction path
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_file="tests/.test-publish-nik-ui.$$"
+          trap 'rm -f "$test_file"' EXIT
+          sed 's/br-core/nik-ui/g' tests/test-publish-local-package.sh > "$test_file"
+          chmod +x "$test_file"
+          bash "$test_file"

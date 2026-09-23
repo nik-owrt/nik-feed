@@ -49,20 +49,16 @@ jobs:
 
       - name: Test nikd publisher transaction path
         shell: bash
-        run: |
-          set -euo pipefail
-          test_file="tests/.test-publish-nikd.$$"
-          trap 'rm -f "$test_file"' EXIT
-          sed 's/br-core/nikd/g' tests/test-publish-local-package.sh > "$test_file"
-          chmod +x "$test_file"
-          bash "$test_file"
+        env:
+          NIK_TEST_PACKAGE: nikd
+          NIK_TEST_IPK_ARCH: aarch64_cortex-a53
+          NIK_TEST_FEED_ARCH: aarch64_cortex-a53
+        run: bash tests/test-publish-local-package.sh
 
-      - name: Test nik-ui publisher transaction path
+      - name: Test nik-ui architecture-all package in target feed
         shell: bash
-        run: |
-          set -euo pipefail
-          test_file="tests/.test-publish-nik-ui.$$"
-          trap 'rm -f "$test_file"' EXIT
-          sed 's/br-core/nik-ui/g' tests/test-publish-local-package.sh > "$test_file"
-          chmod +x "$test_file"
-          bash "$test_file"
+        env:
+          NIK_TEST_PACKAGE: nik-ui
+          NIK_TEST_IPK_ARCH: all
+          NIK_TEST_FEED_ARCH: aarch64_cortex-a53
+        run: bash tests/test-publish-local-package.sh

@@ -27,6 +27,9 @@ concurrency:
 
 jobs:
   publisher:
+    # Push on the canonical migration branch is the authoritative regression
+    # run; skip the duplicate PR event for the same commit on the single runner.
+    if: github.event_name != 'pull_request' || github.head_ref != 'migration/unified-packages'
     runs-on: [self-hosted, Linux, X64, nik-heavy]
     timeout-minutes: 15
     steps:

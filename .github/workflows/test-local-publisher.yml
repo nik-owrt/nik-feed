@@ -1,0 +1,67 @@
+name: Test local publisher
+
+on:
+  push:
+    branches: [main, migration/unified-packages]
+    paths:
+      - .github/actions/publish-local/action.yml
+      - .github/workflows/test-local-publisher.yml
+      - config/packages.txt
+      - scripts/publish-local-package.sh
+      - tests/**
+  pull_request:
+    paths:
+      - .github/actions/publish-local/action.yml
+      - .github/workflows/test-local-publisher.yml
+      - config/packages.txt
+      - scripts/publish-local-package.sh
+      - tests/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nik-feed-test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publisher:
+    # Push on the canonical migration branch is the authoritative regression
+    # run; skip the duplicate PR event for the same commit on the single runner.
+    if: github.event_name != 'pull_request' || github.head_ref != 'migration/unified-packages'
+    runs-on: [self-hosted, Linux, X64, nik-heavy]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Validate unified package contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/publish-local-package.sh
+          grep -qx 'nikd' config/packages.txt
+          grep -qx 'nik-ui' config/packages.txt
+          grep -Fq 'nikd|nik-ui|' scripts/publish-local-package.sh
+
+      - name: Test legacy publisher transaction path
+        shell: bash
+        run: bash tests/test-publish-local-package.sh
+
+      - name: Test nikd publisher transaction path
+        shell: bash
+        env:
+          NIK_TEST_PACKAGE: nikd
+          NIK_TEST_IPK_ARCH: aarch64_cortex-a53
+          NIK_TEST_FEED_ARCH: aarch64_cortex-a53
+        run: bash tests/test-publish-local-package.sh
+
+      - name: Test nik-ui architecture-all package in target feed
+        shell: bash
+        env:
+          NIK_TEST_PACKAGE: nik-ui
+          NIK_TEST_IPK_ARCH: all
+          NIK_TEST_FEED_ARCH: aarch64_cortex-a53
+        run: bash tests/test-publish-local-package.sh

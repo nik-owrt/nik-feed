@@ -21,7 +21,7 @@ fail() {
   exit 1
 }
 
-[[ "$package" =~ ^(br|fr)-[a-z0-9-]+$ ]] || fail "invalid package name: $package"
+[[ "$package" =~ ^(nikd|nik-ui|(br|fr)-[a-z0-9-]+)$ ]] || fail "invalid package name: $package"
 [[ "$sdk_reference" =~ ^ghcr\.io/nik-owrt/openwrt-sdk@sha256:[0-9a-f]{64}$ ]] || fail "invalid immutable SDK reference"
 [[ -d "$source_dir" ]] || fail "package directory does not exist: $source_dir"
 [[ -s "$packages_file" ]] || fail "missing package contract: $packages_file"

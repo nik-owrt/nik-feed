@@ -7,6 +7,9 @@ trap 'rm -rf "$tmp"' EXIT
 
 sdk_reference="ghcr.io/nik-owrt/openwrt-sdk@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 platform_build_id="bbbbbbbbbbbb"
+package="${NIK_TEST_PACKAGE:-br-core}"
+ipk_arch="${NIK_TEST_IPK_ARCH:-aarch64_cortex-a53}"
+feed_arch="${NIK_TEST_FEED_ARCH:-aarch64_cortex-a53}"
 feed_root="$tmp/feed"
 state_root="$tmp/state"
 source_dir="$tmp/source"
@@ -63,17 +66,17 @@ make_package() {
   local version="$1" payload="$2" ipk sha
   rm -rf "$source_dir"
   mkdir -p "$source_dir"
-  ipk="$source_dir/br-core_${version}_aarch64_cortex-a53.ipk"
+  ipk="$source_dir/${package}_${version}_${ipk_arch}.ipk"
   printf '%s\n' "$payload" > "$ipk"
   sha="$(sha256sum "$ipk" | awk '{print $1}')"
-  printf '{"package":"br-core","sdk_reference":"%s","platform_build_id":"%s","artifacts":[{"file":"%s","sha256":"%s"}]}\n' \
-    "$sdk_reference" "$platform_build_id" "$(basename "$ipk")" "$sha" > "$source_dir/package-build.json"
+  printf '{"package":"%s","sdk_reference":"%s","platform_build_id":"%s","artifacts":[{"file":"%s","sha256":"%s"}]}\n' \
+    "$package" "$sdk_reference" "$platform_build_id" "$(basename "$ipk")" "$sha" > "$source_dir/package-build.json"
 }
 
 publish() {
   PATH="$fake_bin:$PATH" \
   NIK_TEST_PLATFORM_BUILD_ID="$platform_build_id" \
-  NIK_PUBLISH_PACKAGE=br-core \
+  NIK_PUBLISH_PACKAGE="$package" \
   NIK_PUBLISH_SOURCE_DIR="$source_dir" \
   NIK_PUBLISH_SDK_REFERENCE="$sdk_reference" \
   NIK_PUBLISH_FEED_ROOT="$feed_root" \
@@ -82,12 +85,12 @@ publish() {
   NIK_PUBLISH_LEGACY_SIGNING_KEY_FILE="$legacy_key" \
   NIK_PUBLISH_CHANNEL=dev \
   NIK_PUBLISH_OPENWRT_VERSION=24.10.4 \
-  NIK_PUBLISH_PACKAGE_ARCH=aarch64_cortex-a53 \
+  NIK_PUBLISH_PACKAGE_ARCH="$feed_arch" \
     bash "$repo_root/scripts/publish-local-package.sh"
 }
 
-live="$feed_root/served/dev/24.10.4/aarch64_cortex-a53"
-legacy_release="$feed_root/releases/dev/24.10.4/aarch64_cortex-a53/legacy"
+live="$feed_root/served/dev/24.10.4/$feed_arch"
+legacy_release="$feed_root/releases/dev/24.10.4/$feed_arch/legacy"
 mkdir -p "$(dirname "$live")" "$legacy_release/.meta"
 ln -s "$legacy_release" "$live"
 
@@ -97,16 +100,16 @@ cmp -s "$legacy_key" "$state_root/keys/nik-feed.key"
 [[ -d "$live" && ! -L "$live" ]]
 [[ -s "$live/Packages.sig" ]]
 [[ -s "$live/nik-feed.pub" ]]
-[[ -f "$live/br-core_1.0.0-1_aarch64_cortex-a53.ipk" ]]
+[[ -f "$live/${package}_1.0.0-1_${ipk_arch}.ipk" ]]
 [[ ! -e "$feed_root/releases" ]]
 live_inode="$(stat -c '%d:%i' "$live")"
 
 make_package 1.1.0-1 second
 publish
 [[ "$(stat -c '%d:%i' "$live")" == "$live_inode" ]]
-[[ -f "$live/br-core_1.1.0-1_aarch64_cortex-a53.ipk" ]]
-[[ ! -e "$live/br-core_1.0.0-1_aarch64_cortex-a53.ipk" ]]
-[[ "$(find "$live" -maxdepth 1 -type f -name 'br-core_*.ipk' | wc -l)" -eq 1 ]]
+[[ -f "$live/${package}_1.1.0-1_${ipk_arch}.ipk" ]]
+[[ ! -e "$live/${package}_1.0.0-1_${ipk_arch}.ipk" ]]
+[[ "$(find "$live" -maxdepth 1 -type f -name "${package}_*.ipk" | wc -l)" -eq 1 ]]
 
 cp "$live/Packages" "$tmp/packages-before-failure"
 make_package 1.2.0-1 third
@@ -114,8 +117,8 @@ if NIK_TEST_DOCKER_FAIL=1 publish; then
   echo 'publisher unexpectedly succeeded after index/sign failure' >&2
   exit 1
 fi
-[[ -f "$live/br-core_1.1.0-1_aarch64_cortex-a53.ipk" ]]
-[[ ! -e "$live/br-core_1.2.0-1_aarch64_cortex-a53.ipk" ]]
+[[ -f "$live/${package}_1.1.0-1_${ipk_arch}.ipk" ]]
+[[ ! -e "$live/${package}_1.2.0-1_${ipk_arch}.ipk" ]]
 cmp -s "$tmp/packages-before-failure" "$live/Packages"
 
 python3 - "$live/feed.json" <<'PY'
@@ -124,7 +127,13 @@ from pathlib import Path
 m = json.loads(Path(sys.argv[1]).read_text())
 assert m['storage'] == 'local-self-hosted'
 assert m['retention_versions_per_package'] == 1
-assert [p['version'] for p in m['packages'] if p['package'] == 'br-core'] == ['1.1.0-1']
+package = __import__('os').environ.get('NIK_TEST_PACKAGE', 'br-core')
+ipk_arch = __import__('os').environ.get('NIK_TEST_IPK_ARCH', 'aarch64_cortex-a53')
+feed_arch = __import__('os').environ.get('NIK_TEST_FEED_ARCH', 'aarch64_cortex-a53')
+items = [p for p in m['packages'] if p['package'] == package]
+assert [p['version'] for p in items] == ['1.1.0-1']
+assert items[0]['architecture'] == ipk_arch
+assert m['architecture'] == feed_arch
 PY
 
 echo 'local publisher regression test: PASS'

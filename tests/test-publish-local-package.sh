@@ -21,6 +21,7 @@ printf 'private test key\n' > "$legacy_key"
 cat > "$fake_bin/docker" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >> "${NIK_TEST_DOCKER_LOG:-/dev/null}"
 case "${1:-}" in
   image)
     if [[ "${2:-}" == inspect && " $* " == *" --format "* ]]; then
@@ -135,5 +136,29 @@ assert [p['version'] for p in items] == ['1.1.0-1']
 assert items[0]['architecture'] == ipk_arch
 assert m['architecture'] == feed_arch
 PY
+
+# A runner-local registry copy of the same SDK digest is run instead of the
+# GHCR identity; the identity is still what the feed records.
+local_image="127.0.0.1:5000/nik-owrt/openwrt-sdk@${sdk_reference##*@}"
+docker_log="$tmp/docker.log"
+make_package 1.3.0-1 fourth
+NIK_TEST_DOCKER_LOG="$docker_log" NIK_PUBLISH_SDK_IMAGE="$local_image" publish
+grep -q "^run .* ${local_image} bash -lc" "$docker_log"
+if grep -q "ghcr.io" "$docker_log"; then
+  echo 'publisher touched the GHCR SDK although a local image was given' >&2
+  exit 1
+fi
+[[ -f "$live/${package}_1.3.0-1_${ipk_arch}.ipk" ]]
+
+for bad_image in \
+  "127.0.0.1:5000/nik-owrt/openwrt-sdk@sha256:$(printf 'c%.0s' {1..64})" \
+  "registry.example/nik-owrt/openwrt-sdk@${sdk_reference##*@}"; do
+  make_package 1.4.0-1 fifth
+  if NIK_PUBLISH_SDK_IMAGE="$bad_image" publish 2>/dev/null; then
+    echo "publisher accepted a foreign SDK image: $bad_image" >&2
+    exit 1
+  fi
+done
+[[ -f "$live/${package}_1.3.0-1_${ipk_arch}.ipk" ]]
 
 echo 'local publisher regression test: PASS'

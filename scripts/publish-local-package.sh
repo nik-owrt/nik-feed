@@ -5,6 +5,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 package="${NIK_PUBLISH_PACKAGE:?NIK_PUBLISH_PACKAGE is required}"
 source_dir="${NIK_PUBLISH_SOURCE_DIR:?NIK_PUBLISH_SOURCE_DIR is required}"
 sdk_reference="${NIK_PUBLISH_SDK_REFERENCE:?NIK_PUBLISH_SDK_REFERENCE is required}"
+# The SDK identity is what the feed records. The image actually run may be the
+# runner-local registry copy of the same digest, so publishing never needs GHCR.
+sdk_image="${NIK_PUBLISH_SDK_IMAGE:-$sdk_reference}"
 channel="${NIK_PUBLISH_CHANNEL:-dev}"
 openwrt_version="${NIK_PUBLISH_OPENWRT_VERSION:-24.10.4}"
 feed_arch="${NIK_PUBLISH_PACKAGE_ARCH:-aarch64_cortex-a53}"
@@ -23,6 +26,11 @@ fail() {
 
 [[ "$package" =~ ^(nikd|nik-ui|(br|fr)-[a-z0-9-]+)$ ]] || fail "invalid package name: $package"
 [[ "$sdk_reference" =~ ^ghcr\.io/nik-owrt/openwrt-sdk@sha256:[0-9a-f]{64}$ ]] || fail "invalid immutable SDK reference"
+if [[ "$sdk_image" != "$sdk_reference" ]]; then
+  [[ "$sdk_image" =~ ^127\.0\.0\.1:[0-9]{1,5}/nik-owrt/openwrt-sdk@sha256:[0-9a-f]{64}$ \
+    && "${sdk_image##*@}" == "${sdk_reference##*@}" ]] ||
+    fail "SDK image must be the loopback registry copy of $sdk_reference: $sdk_image"
+fi
 [[ -d "$source_dir" ]] || fail "package directory does not exist: $source_dir"
 [[ -s "$packages_file" ]] || fail "missing package contract: $packages_file"
 [[ -s "$public_key_file" ]] || fail "missing feed public key: $public_key_file"
@@ -73,8 +81,8 @@ actual_sha="${meta[5]}"
 [[ "$meta_pbid" =~ ^[0-9a-f]{12}$ ]] || fail "package-build platform build id is invalid"
 [[ "$meta_file" == "$(basename "$ipk")" && "$meta_sha" == "$actual_sha" ]] || fail "package-build artifact metadata mismatch"
 
-docker image inspect "$sdk_reference" >/dev/null 2>&1 || docker pull "$sdk_reference" >/dev/null
-sdk_pbid="$(docker image inspect --format '{{ index .Config.Labels "org.nik-link.platform-build-id" }}' "$sdk_reference")"
+docker image inspect "$sdk_image" >/dev/null 2>&1 || docker pull "$sdk_image" >/dev/null
+sdk_pbid="$(docker image inspect --format '{{ index .Config.Labels "org.nik-link.platform-build-id" }}' "$sdk_image")"
 [[ "$sdk_pbid" == "$meta_pbid" ]] || fail "SDK/platform build id mismatch"
 
 # The Windows D: feed and its private state are persistent WSL mounts.
@@ -201,7 +209,7 @@ docker run --rm \
   --mount "type=bind,src=$live,dst=/feed" \
   --mount "type=bind,src=$signing_key_file,dst=/run/nik-feed.sec,readonly" \
   --mount "type=bind,src=$public_key_file,dst=/run/nik-feed.pub,readonly" \
-  "$sdk_reference" bash -lc '
+  "$sdk_image" bash -lc '
     set -euo pipefail
     cd /feed
     mkhash="$(find /opt/openwrt-sdk/staging_dir -type f -path "*/bin/mkhash" -perm -111 | head -n1)"

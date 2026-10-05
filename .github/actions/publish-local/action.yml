@@ -11,6 +11,10 @@ inputs:
   sdk_reference:
     description: Immutable OpenWrt SDK image reference used to generate the native OPKG index.
     required: true
+  sdk_image:
+    description: Optional runner-local registry copy (127.0.0.1) of sdk_reference to run instead of pulling it.
+    required: false
+    default: ""
   feed_root:
     description: Persistent Windows feed root as seen from WSL. Empty uses NIK_LOCAL_FEED_ROOT or /mnt/d/nik-feed.
     required: false
@@ -48,6 +52,7 @@ runs:
         NIK_PUBLISH_PACKAGE: ${{ inputs.package }}
         NIK_PUBLISH_SOURCE_DIR: ${{ inputs.source_dir }}
         NIK_PUBLISH_SDK_REFERENCE: ${{ inputs.sdk_reference }}
+        NIK_PUBLISH_SDK_IMAGE: ${{ inputs.sdk_image }}
         NIK_PUBLISH_FEED_ROOT: ${{ inputs.feed_root }}
         NIK_PUBLISH_STATE_ROOT: ${{ inputs.state_root }}
         NIK_PUBLISH_SIGNING_KEY_FILE: ${{ inputs.signing_key_file }}

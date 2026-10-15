@@ -61,6 +61,8 @@ nik-owrt/nik-feed/.github/actions/publish-local@<immutable-commit-sha>
 
 Each package workflow passes its validated `.artifacts/packages` directory and the exact immutable SDK reference used for the build.
 
+The SDK reference is `<registry>/nik-owrt/openwrt-sdk@sha256:<64 lowercase hex>`, where `<registry>` is `ghcr.io` or, for a runner publication whose platform images exist only in the runner-local registry, the loopback registry `127.0.0.1:<port>`. Any other host or a mutable tag is rejected. The optional `sdk_image` input names a `127.0.0.1:<port>` copy of the same digest to run instead of the reference.
+
 `scripts/publish-local-package.sh`:
 
 1. requires exactly one `<package>_*.ipk` plus `package-build.json`;

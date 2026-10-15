@@ -161,4 +161,49 @@ for bad_image in \
 done
 [[ -f "$live/${package}_1.3.0-1_${ipk_arch}.ipk" ]]
 
+# Runner publication: the SDK identity itself is the loopback registry digest.
+# It is run directly and recorded as the feed's SDK reference.
+ghcr_reference="$sdk_reference"
+sdk_reference="127.0.0.1:5000/nik-owrt/openwrt-sdk@sha256:$(printf 'd%.0s' {1..64})"
+runner_log="$tmp/docker-runner.log"
+make_package 1.5.0-1 sixth
+NIK_TEST_DOCKER_LOG="$runner_log" publish
+grep -q "^run .* ${sdk_reference} bash -lc" "$runner_log"
+if grep -q "ghcr.io" "$runner_log"; then
+  echo 'publisher touched GHCR for a runner-local SDK identity' >&2
+  exit 1
+fi
+[[ -f "$live/${package}_1.5.0-1_${ipk_arch}.ipk" ]]
+python3 - "$live/feed.json" "$live/.meta/${package}.json" "$sdk_reference" <<'PY'
+import json, sys
+from pathlib import Path
+feed = json.loads(Path(sys.argv[1]).read_text())
+meta = json.loads(Path(sys.argv[2]).read_text())
+assert feed['sdk_reference'] == sys.argv[3], feed['sdk_reference']
+assert meta['source_sdk_reference'] == sys.argv[3], meta['source_sdk_reference']
+PY
+
+# Only ghcr.io and a 127.0.0.1:<port> registry are SDK identities; other hosts,
+# other loopback addresses, missing or oversized ports and mutable tags are not.
+digest="${ghcr_reference##*@}"
+for bad_reference in \
+  "docker.io/nik-owrt/openwrt-sdk@$digest" \
+  "127.0.0.2:5000/nik-owrt/openwrt-sdk@$digest" \
+  "localhost:5000/nik-owrt/openwrt-sdk@$digest" \
+  "127.0.0.1/nik-owrt/openwrt-sdk@$digest" \
+  "127.0.0.1:123456/nik-owrt/openwrt-sdk@$digest" \
+  "127.0.0.1:5000/other/openwrt-sdk@$digest" \
+  "127.0.0.1:5000/nik-owrt/openwrt-sdk:latest" \
+  "ghcr.io/nik-owrt/openwrt-sdk:latest" \
+  "ghcr.io/nik-owrt/openwrt-sdk@sha256:$(printf 'A%.0s' {1..64})"; do
+  sdk_reference="$bad_reference"
+  make_package 1.6.0-1 seventh
+  if publish 2>"$tmp/reject.err"; then
+    echo "publisher accepted an invalid SDK reference: $bad_reference" >&2
+    exit 1
+  fi
+  grep -q 'invalid immutable SDK reference' "$tmp/reject.err"
+done
+[[ -f "$live/${package}_1.5.0-1_${ipk_arch}.ipk" ]]
+
 echo 'local publisher regression test: PASS'

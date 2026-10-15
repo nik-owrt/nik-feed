@@ -9,7 +9,7 @@ inputs:
     required: false
     default: .artifacts/packages
   sdk_reference:
-    description: Immutable OpenWrt SDK image reference used to generate the native OPKG index.
+    description: Immutable OpenWrt SDK image reference (ghcr.io or 127.0.0.1:<port> runner-local registry digest) used to generate the native OPKG index.
     required: true
   sdk_image:
     description: Optional runner-local registry copy (127.0.0.1) of sdk_reference to run instead of pulling it.

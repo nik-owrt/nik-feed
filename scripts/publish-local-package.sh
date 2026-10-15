@@ -5,7 +5,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 package="${NIK_PUBLISH_PACKAGE:?NIK_PUBLISH_PACKAGE is required}"
 source_dir="${NIK_PUBLISH_SOURCE_DIR:?NIK_PUBLISH_SOURCE_DIR is required}"
 sdk_reference="${NIK_PUBLISH_SDK_REFERENCE:?NIK_PUBLISH_SDK_REFERENCE is required}"
-# The SDK identity is what the feed records. The image actually run may be the
+# The SDK identity is what the feed records: a GHCR digest, or for a runner
+# publication (platform images published only to the runner-local registry) the
+# loopback registry digest itself. The image actually run may be the
 # runner-local registry copy of the same digest, so publishing never needs GHCR.
 sdk_image="${NIK_PUBLISH_SDK_IMAGE:-$sdk_reference}"
 channel="${NIK_PUBLISH_CHANNEL:-dev}"
@@ -25,7 +27,7 @@ fail() {
 }
 
 [[ "$package" =~ ^(nikd|nik-ui|(br|fr)-[a-z0-9-]+)$ ]] || fail "invalid package name: $package"
-[[ "$sdk_reference" =~ ^ghcr\.io/nik-owrt/openwrt-sdk@sha256:[0-9a-f]{64}$ ]] || fail "invalid immutable SDK reference"
+[[ "$sdk_reference" =~ ^(ghcr\.io|127\.0\.0\.1:[0-9]{1,5})/nik-owrt/openwrt-sdk@sha256:[0-9a-f]{64}$ ]] || fail "invalid immutable SDK reference"
 if [[ "$sdk_image" != "$sdk_reference" ]]; then
   [[ "$sdk_image" =~ ^127\.0\.0\.1:[0-9]{1,5}/nik-owrt/openwrt-sdk@sha256:[0-9a-f]{64}$ \
     && "${sdk_image##*@}" == "${sdk_reference##*@}" ]] ||

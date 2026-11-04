@@ -37,7 +37,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          pair='ghcr.io/nik-owrt/openwrt-platform-pair:sy-fb-r3000-latest'
+          pair='ghcr.io/nik-owrt/openwrt-platform-pair:nk_pl_1-latest'
           docker pull "$pair" >/dev/null
           sdk="$(docker image inspect --format '{{ index .Config.Labels "org.nik-link.sdk-reference" }}' "$pair")"
           [[ "$sdk" =~ ^ghcr\.io/nik-owrt/openwrt-sdk@sha256:[0-9a-f]{64}$ ]]

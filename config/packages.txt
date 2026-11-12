@@ -9,6 +9,10 @@
 nikd
 nik-ui
 
+# Board services
+# nik-charger: the Rust BQ25792 charger daemon (Go board). Built from nik-owrt/nik-charger.
+nik-charger
+
 # Legacy backend (migration rollback)
 br-core
 br-cellular
